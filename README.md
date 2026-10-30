@@ -75,7 +75,9 @@ python scripts/build_exe.py --no-bin # 不拷贝 ffmpeg 等大文件，只出程
 
 打包用的是 PyInstaller 的 onedir 模式，而不是单文件：`resource/` 与 `config/` 放在 exe 同级，用户可以直接替换 ffmpeg / yt-dlp、改配置；`models/`、`tools/` 在首次使用时生成。
 
-实测产物（v0.1.0）：`DeepSub.exe` 约 29 MB，整个目录约 715 MB（其中 483 MB 是 ffmpeg / ffprobe / yt-dlp），打成 zip 后约 300 MB。
+实测产物（v0.1.0）：`DeepSub.exe` 约 29 MB，整个目录约 700 MB（其中 483 MB 是 ffmpeg / ffprobe / yt-dlp），打成 zip 后 283 MB。
+
+如果只想要程序本体，用 `--no-bin` 构建，产物约 230 MB，运行时自己把四个工具丢进 `resource/bin/` 即可。
 
 之所以不做成一个 exe：单文件模式每次启动都要把 200 MB+ 解压到临时目录，启动要十几秒，还更容易被杀毒软件误报；而且内置工具本来就需要能被用户替换。
 
