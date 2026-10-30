@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" version="1.2" baseProfile="tiny">
+<title>DeepSub icon · refresh</title>
+<desc>DeepSub UI line icon</desc>
+<g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<g fill="none" stroke="#1d1d1f" stroke-opacity="1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" transform="matrix(1,0,0,1,0,0)" font-family="SimSun" font-size="9" font-weight="400" font-style="normal">
+<path vector-effect="none" fill-rule="evenodd" d="M16.001,5.07082 C14.8241,4.38979 13.4575,4 12,4 C7.58172,4 4,7.58172 4,12 C4,16.4183 7.58172,20 12,20 C15.4565,20 18.4011,17.8079 19.5192,14.738 " />
+<polyline fill="none" vector-effect="none" points="15.4,2.8 16.6,6.6 12.8,7.6 " />
+</g>
+
+</g>
+</svg>

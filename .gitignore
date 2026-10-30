@@ -1,0 +1,43 @@
+# ---- 运行时生成的数据，不进仓库 ----
+/downloads/
+/models/
+/cache/
+/logs/
+/temp/
+/dir/
+/config/settings.json
+/tools/
+
+# ---- 内置二进制工具：体积数百 MB，发布时单独提供 ----
+/resource/bin/*
+!/resource/bin/.gitkeep
+
+# ---- 打包产物 ----
+/dist/
+/build/work/
+/build/_version_info.txt
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/lib/
+.venv/
+venv/
+env/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.trae/
+.workbuddy/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地备份 ----
+/.trash/
+
+# 构建日志与临时截图
+/build/*.log
+/build/*.png

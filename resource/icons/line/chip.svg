@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" version="1.2" baseProfile="tiny">
+<title>DeepSub icon · chip</title>
+<desc>DeepSub UI line icon</desc>
+<g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<g fill="none" stroke="#1d1d1f" stroke-opacity="1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" transform="matrix(1,0,0,1,0,0)" font-family="SimSun" font-size="9" font-weight="400" font-style="normal">
+<path vector-effect="none" fill-rule="evenodd" d="M5.6,8.8 C5.6,7.03269 7.03269,5.6 8.8,5.6 L15.2,5.6 C16.9673,5.6 18.4,7.03269 18.4,8.8 L18.4,15.2 C18.4,16.9673 16.9673,18.4 15.2,18.4 L8.8,18.4 C7.03269,18.4 5.6,16.9673 5.6,15.2 L5.6,8.8" />
+<path vector-effect="none" fill-rule="evenodd" d="M9.5,10.7 C9.5,10.0373 10.0373,9.5 10.7,9.5 L13.3,9.5 C13.9627,9.5 14.5,10.0373 14.5,10.7 L14.5,13.3 C14.5,13.9627 13.9627,14.5 13.3,14.5 L10.7,14.5 C10.0373,14.5 9.5,13.9627 9.5,13.3 L9.5,10.7" />
+<polyline fill="none" vector-effect="none" points="9.1,2.8 9.1,5.6 " />
+<polyline fill="none" vector-effect="none" points="9.1,18.4 9.1,21.2 " />
+<polyline fill="none" vector-effect="none" points="2.8,9.1 5.6,9.1 " />
+<polyline fill="none" vector-effect="none" points="18.4,9.1 21.2,9.1 " />
+<polyline fill="none" vector-effect="none" points="14.9,2.8 14.9,5.6 " />
+<polyline fill="none" vector-effect="none" points="14.9,18.4 14.9,21.2 " />
+<polyline fill="none" vector-effect="none" points="2.8,14.9 5.6,14.9 " />
+<polyline fill="none" vector-effect="none" points="18.4,14.9 21.2,14.9 " />
+</g>
+
+</g>
+</svg>
