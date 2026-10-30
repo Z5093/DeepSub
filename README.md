@@ -35,7 +35,7 @@
 需要 Windows 10/11 x64 + Python 3.10+（开发环境是 3.12）。
 
 ```bash
-git clone <repo-url> DeepSub
+git clone https://github.com/Z5093/DeepSub.git
 cd DeepSub
 pip install -r requirements.txt
 python main.py
