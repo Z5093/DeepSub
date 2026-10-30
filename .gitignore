@@ -1,6 +1,5 @@
 # ---- 运行时生成的数据，不进仓库 ----
 /downloads/
-/models/
 /cache/
 /logs/
 /temp/
@@ -8,14 +7,25 @@
 /config/settings.json
 /tools/
 
+# ---- 模型 ----
+# 只收随包分发的小模型（Silero VAD，2.3MB）；语音识别用的 faster-whisper
+# 模型有 3.4GB，由「语音识别」页按需下载，不进仓库
+/models/*
+!/models/silero-vad/
+!/models/silero-vad/silero_vad.onnx
+
 # ---- 内置二进制工具：体积数百 MB，发布时单独提供 ----
 /resource/bin/*
 !/resource/bin/.gitkeep
 
-# ---- 打包产物 ----
+# ---- scripts/make_icons.py 生成的线性图标 ----
+# 界面图标是 app/components/icons.py 用 QPainter 现画的，运行时不读这些文件
+/resource/icons/line/
+
+# ---- 打包产物与构建缓存（只保留 spec）----
 /dist/
-/build/work/
-/build/_version_info.txt
+/build/*
+!/build/deepsub.spec
 
 # ---- Python ----
 __pycache__/
@@ -35,9 +45,6 @@ env/
 Thumbs.db
 desktop.ini
 
-# ---- 本地备份 ----
+# ---- 本地备份 / 临时 ----
 /.trash/
-
-# 构建日志与临时截图
-/build/*.log
-/build/*.png
+*.bak
