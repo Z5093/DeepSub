@@ -419,7 +419,7 @@ class DownloadPage(QWidget):
     def _start_ytdlp_upgrade(self):
         self._check_update_btn.setEnabled(False)
         self._upgrade_btn.setEnabled(False)
-        self._terminal.append_line("开始通过 pip 升级 yt-dlp", "info")
+        self._terminal.append_line("开始升级 yt-dlp（下载官方单文件）", "info")
         self._update_thread = YtdlpUpdateThread(upgrade=True, parent=self)
         self._update_thread.log.connect(self._on_update_log)
         self._update_thread.completed.connect(self._on_upgrade_completed)

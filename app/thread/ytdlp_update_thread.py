@@ -15,7 +15,7 @@ class YtdlpUpdateThread(QThread):
         try:
             from app.core.utils.ytdlp_utils import (
                 get_ytdlp_path, get_ytdlp_version, get_latest_ytdlp_version,
-                is_newer_version, upgrade_ytdlp_via_pip,
+                is_newer_version, upgrade_ytdlp,
             )
 
             ytdlp_path = get_ytdlp_path()
@@ -31,7 +31,7 @@ class YtdlpUpdateThread(QThread):
             self.log.emit("正在查询最新版本...", "dim")
             latest = get_latest_ytdlp_version()
             if not latest:
-                self.completed.emit(False, "无法查询最新版本，请检查网络或 pip 镜像源")
+                self.completed.emit(False, "无法查询最新版本，请检查网络或代理设置")
                 return
 
             has_update = is_newer_version(latest, current)
@@ -47,8 +47,8 @@ class YtdlpUpdateThread(QThread):
                 self.completed.emit(True, f"发现新版本 {latest}，可点击「升级」按钮更新")
                 return
 
-            self.log.emit("正在通过 pip 升级...", "info")
-            success, new_version, msg = upgrade_ytdlp_via_pip()
+            self.log.emit("正在下载官方 yt-dlp.exe（约 20MB）...", "info")
+            success, new_version, msg = upgrade_ytdlp()
             if success:
                 self.log.emit(f"升级完成: {current} → {new_version}", "success")
                 self.completed.emit(True, f"升级成功: {current} → {new_version}")

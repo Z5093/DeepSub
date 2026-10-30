@@ -6,9 +6,24 @@ import shutil
 import subprocess
 import sys
 
-from app.common.paths import get_app_root, get_bin_dir, get_bin_path
+from app.common.paths import get_app_root, get_bin_dir, get_bin_path, is_frozen
 
 _PROJECT_ROOT = get_app_root()
+
+#: 官方 standalone 单文件（约 20MB 起）。pip 装出来的 yt-dlp.exe 只有 ~100KB，
+#: 本质是指向构建机 python.exe 的启动壳（内嵌 ``#!"C:\...\python.exe"``），
+#: 拷进发布包后换台机器必然起不来 —— v0.2.0 的发布包就是这么坏的。
+#: 因此内置文件和升级逻辑只认官方单文件，任何情况下都不再引入 pip 启动壳。
+_YTDLP_EXE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+_YTDLP_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+_GH_MIRRORS = [
+    "",
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://mirror.ghproxy.com/",
+    "https://ghps.cc/",
+]
+_MIN_STANDALONE_SIZE = 5 * 1024 * 1024
 
 _FORMAT_MAP = {
     # 优先选 mp4 视频 + m4a 音频，保证能干净地合进 mp4 容器
@@ -348,6 +363,9 @@ def get_ytdlp_version(executable_path: str) -> str:
 
 
 def _get_latest_ytdlp_version_fallback() -> str:
+    """源码环境下用 pip 兜底查最新版；打包后 sys.executable 是 DeepSub.exe，直接跳过。"""
+    if is_frozen():
+        return ""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "yt-dlp=="],
@@ -365,61 +383,36 @@ def _get_latest_ytdlp_version_fallback() -> str:
     return m.group(1).strip() if m else ""
 
 
-def get_latest_ytdlp_version() -> str:
+def get_latest_ytdlp_version_remote() -> str:
+    """从 GitHub Release 取最新版本号，失败时依次走镜像。"""
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "index", "versions", "yt-dlp"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_no_window_flags(),
-            timeout=60,
-        )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        return _get_latest_ytdlp_version_fallback()
-    combined = (result.stdout or "") + "\n" + (result.stderr or "")
-    m = re.search(r"yt-dlp\s*\(([^)]+)\)", combined)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"Available versions:\s*([0-9][0-9.\-]*)", combined)
-    if m:
-        return m.group(1).strip()
-    return _get_latest_ytdlp_version_fallback()
-
-
-def find_pip_installed_ytdlp_exe() -> str:
-    path = shutil.which("yt-dlp")
-    if path and os.path.isfile(path):
-        return path
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "show", "-f", "yt-dlp"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_no_window_flags(),
-            timeout=30,
-        )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        import httpx
+    except ImportError:
         return ""
-    if result.returncode != 0:
-        return ""
-    location = ""
-    exe_rel = ""
-    for line in (result.stdout or "").splitlines():
-        s = line.strip()
-        if s.startswith("Location:"):
-            location = s.split(":", 1)[1].strip()
-        elif "yt-dlp" in s and ("Scripts" in s or "/bin/" in s or s.startswith("..\\Scripts") or s.startswith("../bin")):
-            if s.endswith("yt-dlp.exe") or s.endswith("yt-dlp"):
-                exe_rel = s
-    if location and exe_rel:
-        candidate = os.path.normpath(os.path.join(location, exe_rel))
-        if os.path.isfile(candidate):
-            return candidate
+    for mirror in _GH_MIRRORS:
+        url = mirror + _YTDLP_API_URL if mirror else _YTDLP_API_URL
+        try:
+            with httpx.Client(
+                timeout=20.0,
+                follow_redirects=True,
+                headers={"User-Agent": "DeepSub/1.0", "Accept": "application/vnd.github+json"},
+            ) as client:
+                resp = client.get(url)
+            if resp.status_code >= 400:
+                continue
+            tag = str((resp.json() or {}).get("tag_name") or "").strip()
+            if tag:
+                return tag.lstrip("vV")
+        except Exception:
+            continue
     return ""
+
+
+def get_latest_ytdlp_version() -> str:
+    remote = get_latest_ytdlp_version_remote()
+    if remote:
+        return remote
+    return _get_latest_ytdlp_version_fallback()
 
 
 def is_newer_version(latest: str, current: str) -> bool:
@@ -451,60 +444,94 @@ def _upgrade_via_self_update(bundled: str) -> tuple[bool, str, str]:
     if result.returncode != 0:
         return False, "", ""
     new_version = get_ytdlp_version(bundled)
-    return True, new_version, "升级成功（官方单文件）"
+    if not new_version:
+        return False, "", ""
+    return True, new_version, "升级成功（官方单文件自更新）"
 
 
-def upgrade_ytdlp_via_pip() -> tuple[bool, str, str]:
+def download_standalone_ytdlp(dest_path: str) -> tuple[bool, str]:
+    """下载官方 standalone 单文件到 dest_path（先写 .tmp，失败不动现有文件）。"""
+    try:
+        import httpx
+    except ImportError:
+        return False, ""
+
+    dest_dir = os.path.dirname(dest_path)
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+    tmp_path = dest_path + ".tmp"
+
+    for mirror in _GH_MIRRORS:
+        url = mirror + _YTDLP_EXE_URL if mirror else _YTDLP_EXE_URL
+        try:
+            with httpx.stream(
+                "GET",
+                url,
+                follow_redirects=True,
+                timeout=180.0,
+                headers={"User-Agent": "DeepSub/1.0"},
+            ) as resp:
+                if resp.status_code >= 400:
+                    continue
+                with open(tmp_path, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+            size = os.path.getsize(tmp_path)
+            if size < _MIN_STANDALONE_SIZE:
+                raise OSError(f"下载内容过小（{size} 字节）")
+            with open(tmp_path, "rb") as f:
+                if f.read(2) != b"MZ":
+                    raise OSError("下载内容不是 Windows 可执行文件")
+            os.replace(tmp_path, dest_path)
+            return True, mirror or "github.com"
+        except Exception:
+            if os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            continue
+    return False, ""
+
+
+def upgrade_ytdlp() -> tuple[bool, str, str]:
+    """升级内置 yt-dlp，只走官方 standalone 单文件。
+
+    为什么不走 pip：打包后 sys.executable 是 DeepSub.exe，`-m pip` 根本没有；
+    即便在源码环境，pip 产出的 yt-dlp.exe 也只是个指向本机 python 的启动壳，
+    拷进发布包就是坏件（v0.2.0 发布包即由此损坏）。
+    """
     bundled = get_ytdlp_path()
 
-    # 官方 standalone 版本优先自更新；pip 启动壳没有自更新能力，走 pip
+    # 已经是官方单文件：先让它自己升级（最快，也最不容易被镜像拖慢）
     if os.path.isfile(bundled) and not is_pip_stub(bundled):
         ok, version, msg = _upgrade_via_self_update(bundled)
         if ok:
             return ok, version, msg
 
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_no_window_flags(),
-            timeout=300,
-        )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
-        return False, "", f"pip 执行失败: {e}"
-    if result.returncode != 0:
-        tail = ""
-        for stream in (result.stderr, result.stdout):
-            if stream and stream.strip():
-                tail = stream.strip().splitlines()[-1]
-                break
-        return False, "", f"pip 升级失败: {tail or '未知错误'}"
-
-    src_exe = find_pip_installed_ytdlp_exe()
-    if not src_exe or not os.path.isfile(src_exe):
-        return False, "", "pip 安装成功但未找到 yt-dlp.exe，请确认 pip 的 Scripts 目录在系统 PATH 中"
-
+    backup = ""
     if os.path.isfile(bundled):
         backup = bundled + ".bak"
         try:
             shutil.copy2(bundled, backup)
         except OSError:
-            pass
+            backup = ""
 
-    try:
-        shutil.copy2(src_exe, bundled)
-    except OSError as e:
-        return False, "", f"替换打包版本失败: {e}"
+    ok, source = download_standalone_ytdlp(bundled)
+    if not ok:
+        return False, "", "下载官方 yt-dlp.exe 失败，请检查网络或代理后重试"
 
     new_version = get_ytdlp_version(bundled)
-    return True, new_version, "升级成功"
+    if not new_version:
+        # 下载到的文件跑不起来，回滚，避免把能用的旧版本覆盖成坏件
+        if backup and os.path.isfile(backup):
+            try:
+                shutil.copy2(backup, bundled)
+            except OSError:
+                pass
+        return False, "", "下载的文件无法运行，已回滚到原版本"
 
-
-def upgrade_ytdlp() -> tuple[bool, str, str]:
-    return upgrade_ytdlp_via_pip()
+    return True, new_version, f"升级成功（官方单文件，来源 {source}）"
 
 
 # ---------------------------------------------------------------- 错误诊断

@@ -53,6 +53,10 @@ resource/bin/
 
 这些文件体积较大，**没有放进仓库**，请自行从各自官方渠道下载。缺少时对应功能会提示，其余功能仍可用。
 
+> `yt-dlp.exe` 必须是[官方 standalone 单文件](https://github.com/yt-dlp/yt-dlp/releases/latest)（20MB 起）。
+> pip 装出来的 `yt-dlp.exe` 只有 ~100KB，本质是指向本机 python 的启动壳，
+> 换台机器就起不来，构建脚本会用体积阈值把它拦下来（见下文自检）。
+
 ## 外部依赖
 
 程序本身只是外壳，真正干活的是这些独立组件，第一次使用需要准备：
@@ -73,9 +77,15 @@ python scripts/build_exe.py --zip    # 顺便打发布包
 python scripts/build_exe.py --no-bin # 不拷贝 ffmpeg 等大文件，只出程序本体
 ```
 
-打包用的是 PyInstaller 的 onedir 模式，而不是单文件：`resource/` 与 `config/` 放在 exe 同级，用户可以直接替换 ffmpeg / yt-dlp、改配置；`models/`、`tools/` 在首次使用时生成。
+打包用的是 PyInstaller 的 onedir 模式，而不是单文件：`resource/` 与 `config/` 放在 exe 同级，用户可以直接替换 ffmpeg / yt-dlp、改配置；`models/faster-whisper`、`tools/` 在首次使用时按需下载。
 
-实测产物（v0.1.0）：`DeepSub.exe` 约 29 MB，整个目录约 700 MB（其中 483 MB 是 ffmpeg / ffprobe / yt-dlp），打成 zip 后 283 MB。
+构建脚本会做三件容易漏的事，并在最后跑一遍产物自检（缺文件或 `yt-dlp.exe` 是 pip 启动壳会直接失败）：
+
+1. 把 `resource/{icons,fonts,styles}` 和 `resource/bin` 拷到 exe 同级；
+2. 把 `models/silero-vad/silero_vad.onnx`（2.3MB 静音检测模型）一并带上——不带的话程序会去 GitHub 现下，下不动就静默退化成定长分块；
+3. `models/faster-whisper`（3.4GB）**不打进包**，由「语音识别」页按需下载。
+
+实测产物（v0.2.0）：`DeepSub.exe` 约 29 MB，整个目录约 720 MB（其中 464 MB 是 gyan full build 的 ffmpeg + ffprobe），打成 zip 后 321 MB。
 
 如果只想要程序本体，用 `--no-bin` 构建，产物约 230 MB，运行时自己把四个工具丢进 `resource/bin/` 即可。
 

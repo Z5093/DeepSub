@@ -27,6 +27,20 @@ APP_DIR = os.path.join(DIST, "DeepSub")
 RESOURCE_PARTS = ("icons", "fonts", "styles")
 #: 体积大、可选拷贝的内置命令行工具
 BIN_DIR = os.path.join(ROOT, "resource", "bin")
+#: 必须随包分发的小模型（运行时路径是 exe 同级 models/ 下，缺失会退回联网下载，
+#: 而 GitHub 在国内经常下不动，VAD 就会静默退化为定长分块）。faster-whisper 模型
+#: 3.4GB 走「语音识别」页按需下载，不在这里。
+MODELS_PARTS = ("silero-vad",)
+
+#: assemble 之后必须存在的东西：(相对 APP_DIR 的路径, 最小体积, 说明)
+REQUIRED_ARTIFACTS = (
+    ("DeepSub.exe", 1 * 1024 * 1024, "主程序"),
+    (os.path.join("resource", "bin", "ffmpeg.exe"), 20 * 1024 * 1024, "ffmpeg"),
+    (os.path.join("resource", "bin", "ffprobe.exe"), 20 * 1024 * 1024, "ffprobe"),
+    (os.path.join("resource", "bin", "yt-dlp.exe"), 5 * 1024 * 1024, "yt-dlp（官方单文件）"),
+    (os.path.join("resource", "bin", "7z.exe"), 100 * 1024, "7z"),
+    (os.path.join("models", "silero-vad", "silero_vad.onnx"), 1_500_000, "Silero VAD 模型"),
+)
 
 
 def read_version() -> str:
@@ -101,8 +115,18 @@ def assemble(with_bin: bool) -> None:
     if with_bin:
         copy_tree(BIN_DIR, os.path.join(resource_dst, "bin"))
 
+    models_dst = os.path.join(APP_DIR, "models")
+    for part in MODELS_PARTS:
+        src = os.path.join(ROOT, "models", part)
+        if not os.path.isdir(src):
+            print(f"警告：缺少小模型目录 models/{part}，运行时只能联网下载", file=sys.stderr)
+            continue
+        copy_tree(src, os.path.join(models_dst, part))
+
     os.makedirs(os.path.join(APP_DIR, "config"), exist_ok=True)
     os.makedirs(os.path.join(APP_DIR, "downloads"), exist_ok=True)
+    os.makedirs(os.path.join(APP_DIR, "tools"), exist_ok=True)
+    os.makedirs(os.path.join(models_dst, "faster-whisper"), exist_ok=True)
 
     readme = """DeepSub 绿色版使用说明
 ========================
@@ -111,14 +135,40 @@ def assemble(with_bin: bool) -> None:
 2. resource\\bin 下需要这些工具（发布包里通常已包含）：
      ffmpeg.exe / ffprobe.exe / yt-dlp.exe / 7z.exe
    缺失时「视频下载」和「音频提取」不可用，可直接把新版 exe 覆盖进去。
-3. 「语音识别」页首次使用需要下载 faster-whisper 程序和 Whisper 模型，
-   默认放在 tools\\ 与 models\\ 下，均在本机运行，不上传任何文件。
-4. 翻译同样在本机运行（llama.cpp + Index-Translate），也可改成任意 OpenAI 兼容接口。
-5. 配置文件在 config\\settings.json，删掉它即可重新进入新手引导。
-6. 卸载：直接删除整个文件夹。
+   注意：yt-dlp.exe 必须是官方 standalone 单文件（20MB 左右），
+   pip 生成的那种 100KB 启动壳换台机器就跑不起来。
+3. models\\silero-vad\\silero_vad.onnx 是静音检测模型（约 2.3MB），
+   已随包提供；万一被删掉，程序会尝试联网重新下载。
+4. 「语音识别」页首次使用需要下载 faster-whisper 程序和 Whisper 模型
+   （体积大，按需下载，不随包分发），默认放在 tools\\ 与 models\\ 下，
+   均在本机运行，不上传任何文件。
+5. 翻译默认走官方 Index-Translate 免费接口；想本地跑的话需要自己准备
+   llama.cpp（llama-server.exe）和 gguf 模型，并在「设置」里填目录。
+6. 配置文件在 config\\settings.json，删掉它即可重新进入新手引导。
+7. 卸载：直接删除整个文件夹。
 """
     with open(os.path.join(APP_DIR, "使用说明.txt"), "w", encoding="utf-8") as f:
         f.write(readme)
+
+
+def verify() -> list[str]:
+    """检查产物是否齐活。返回问题列表，空列表表示通过。
+
+    曾经踩过的坑：resource/bin/yt-dlp.exe 被 pip 自动升级成了 100KB 的启动壳，
+    在构建机上能跑、发出去就报错。这里用体积阈值把这类问题挡在发布前。
+    """
+    problems: list[str] = []
+    for rel, min_size, label in REQUIRED_ARTIFACTS:
+        path = os.path.join(APP_DIR, rel)
+        if not os.path.isfile(path):
+            problems.append(f"缺少 {label}: {rel}")
+            continue
+        size = os.path.getsize(path)
+        if size < min_size:
+            problems.append(
+                f"{label} 体积异常: {rel} 只有 {size / 1024 / 1024:.2f} MB（应 ≥ {min_size / 1024 / 1024:.1f} MB）"
+            )
+    return problems
 
 
 def make_zip(version: str) -> str:
@@ -151,9 +201,16 @@ def main() -> int:
     write_version_info(version)
 
     print("[2/4] 清理旧产物")
-    shutil.rmtree(APP_DIR, ignore_errors=True)
+    try:
+        shutil.rmtree(APP_DIR)
+    except OSError:
+        # 产物被占用或权限不足时不要中断构建，交给 PyInstaller 的 --noconfirm 覆盖
+        print("  旧产物未能整体删除，改由 PyInstaller 覆盖（可能有残留文件）")
     if args.clean:
-        shutil.rmtree(WORK, ignore_errors=True)
+        try:
+            shutil.rmtree(WORK)
+        except OSError:
+            print("  构建缓存未能删除，继续使用旧缓存")
 
     print("[3/4] PyInstaller 构建中（首次约 1-3 分钟）")
     cmd = [
@@ -173,6 +230,15 @@ def main() -> int:
     print(f"\n完成：{exe_path}  ({size_mb:.1f} MB)")
     if args.no_bin:
         print("提示：本次未拷贝 resource/bin，运行前请自行放入 ffmpeg / yt-dlp 等工具")
+
+    problems = [] if args.no_bin else verify()
+    if problems:
+        print("\n产物自检未通过：", file=sys.stderr)
+        for item in problems:
+            print(f"  - {item}", file=sys.stderr)
+        return 2
+    if not args.no_bin:
+        print("产物自检通过：ffmpeg / ffprobe / yt-dlp / 7z / silero-vad 均已就位")
 
     if args.zip:
         zip_path = make_zip(version)

@@ -7,7 +7,9 @@
 刻意不打包的东西：
 - resource/bin 下的 ffmpeg / ffprobe / yt-dlp / 7z：体积近 500MB，由构建脚本按需拷贝，
   不进 PYZ，方便用户自己换新版本
-- models/ 与 tools/ 下的识别模型、faster-whisper 程序：运行时在「语音识别」页下载
+- models/ 下的大模型（faster-whisper，3.4GB）与 tools/ 下的识别程序：运行时按需下载
+- 注意：models/silero-vad 这个 2.3MB 的 VAD 小模型必须随包发（构建脚本会拷到
+  exe 同级 models/silero-vad），否则只能联网下载，GitHub 不通时会退化成定长分块
 - torch / transformers / faster-whisper 等 Python 包：本程序只调用外部 exe，用不到
 """
 
