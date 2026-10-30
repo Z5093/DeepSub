@@ -87,7 +87,7 @@ def copy_tree(src: str, dst: str) -> None:
         target = dst if rel == "." else os.path.join(dst, rel)
         os.makedirs(target, exist_ok=True)
         for name in files:
-            if name.lower().endswith(SKIP_SUFFIXES):
+            if name.startswith(".") or name.lower().endswith(SKIP_SUFFIXES):
                 continue
             shutil.copy2(os.path.join(base, name), os.path.join(target, name))
 
