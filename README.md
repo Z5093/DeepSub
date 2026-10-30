@@ -111,7 +111,7 @@ DeepSub/
 ├── scripts/                 # 构建与开发脚本
 ├── tests/                   # 离线回归测试
 ├── docs/                    # 截图与设计笔记
-└── spec.md                  # 完整功能规格（写给自己看的，比较细）
+└── spec.md                  # 立项时的功能规格（设计稿，部分未实现）
 ```
 
 跑一下离线测试（用假 translator，不联网、不加载模型，秒级完成）：
@@ -124,7 +124,7 @@ python tests/test_translation_flow.py
 
 说得直白一些，下面这些是明确还没做好的：
 
-- **只测过 Windows 10/11 x64**，其他平台没试过，也没有 CI。
+- **只测过 Windows 10/11 x64**，其他平台没试过；CI 只跑 Linux 上的离线回归测试，打包流程本身没有自动化。
 - **没有系统测试用例**，主流程是人工跑真实视频验证的，边界情况（异常字幕、超长行、字符编码）保不齐会翻车。
 - **批量队列、自动更新、插件系统**只在设计里，还没实现。
 - **界面只有中文**，高 DPI 缩放下个别控件可能错位。
@@ -144,6 +144,19 @@ python tests/test_translation_flow.py
 - [**PyQt5**](https://riverbankcomputing.com/software/pyqt/) / [**Qt**](https://www.qt.io/) — 界面框架。
 - [**pysbd**](https://github.com/nipunsadvilkar/pySBD) — 句边界检测。
 - [**7-Zip**](https://www.7-zip.org/) — 安装包解压。
+
+## 第三方组件与许可
+
+本仓库只包含 DeepSub 自己的代码（MIT）。发布用的绿色版 zip 里额外打包了这些**独立程序**，版权归各自作者，请按其许可使用与再分发：
+
+| 组件 | 许可 | 说明 |
+| --- | --- | --- |
+| [ffmpeg / ffprobe](https://ffmpeg.org/) | GPL v3（gyan full build） | 独立进程调用；如二次分发请一并提供源码或指向官方 |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Unlicense | 官方 standalone 单文件 |
+| [7-Zip](https://www.7-zip.org/) | LGPL | 仅用于解压 faster-whisper 安装包 |
+| [Silero VAD](https://github.com/snakers4/silero-vad) | MIT | `models/silero-vad/silero_vad.onnx` 随仓库与发布包分发 |
+
+faster-whisper、Whisper 模型、llama.cpp 与翻译模型都**不随包分发**，由用户按各自许可自行下载。
 
 ## 免责声明
 
