@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.common.constants import (
+    APP_VERSION,
     PAGE_DOWNLOAD, PAGE_FASTERWHISPER, PAGE_LLAMACPP, PAGE_SETTINGS, PAGE_WORKSPACE,
 )
 from app.common.theme import UITheme as T
@@ -172,7 +173,8 @@ class Sidebar(QFrame):
         foot.addStretch(1)
         layout.addLayout(foot)
 
-        version = QLabel("0.2.0")
+        # 版本号统一取 APP_VERSION，别在界面里写死
+        version = QLabel(f"v{APP_VERSION}")
         version.setStyleSheet(
             f"color: {T.TEXT_TERTIARY}; font-family: {T.FONT_MONO}; font-size: 10px;"
             " background: transparent; padding-left: 10px;"

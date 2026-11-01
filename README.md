@@ -85,9 +85,9 @@ python scripts/build_exe.py --no-bin # 不拷贝 ffmpeg 等大文件，只出程
 2. 把 `models/silero-vad/silero_vad.onnx`（2.3MB 静音检测模型）一并带上——不带的话程序会去 GitHub 现下，下不动就静默退化成定长分块；
 3. `models/faster-whisper`（3.4GB）**不打进包**，由「语音识别」页按需下载。
 
-实测产物（v0.2.0）：`DeepSub.exe` 约 29 MB，整个目录约 720 MB（其中 464 MB 是 gyan full build 的 ffmpeg + ffprobe），打成 zip 后 321 MB。
+实测产物（v0.2.1）：`DeepSub.exe` 约 11 MB，整个目录约 670 MB（其中 487 MB 是 gyan full build 的 ffmpeg + ffprobe），打成 zip 后 276 MB。
 
-如果只想要程序本体，用 `--no-bin` 构建，产物约 230 MB，运行时自己把四个工具丢进 `resource/bin/` 即可。
+如果只想要程序本体，用 `--no-bin` 构建，产物约 182 MB，运行时自己把四个工具丢进 `resource/bin/` 即可。
 
 之所以不做成一个 exe：单文件模式每次启动都要把 200 MB+ 解压到临时目录，启动要十几秒，还更容易被杀毒软件误报；而且内置工具本来就需要能被用户替换。
 
@@ -97,7 +97,7 @@ python scripts/build_exe.py --no-bin # 不拷贝 ffmpeg 等大文件，只出程
 DeepSub/
 ├── main.py                  # 入口
 ├── app/
-│   ├── common/              # 配置、常量、信号总线、设计令牌、路径解析
+│   ├── common/              # 配置、常量、信号总线、设计令牌、路径解析、日志
 │   ├── components/          # 自绘 UI 组件（按钮/卡片/流程轨道/图标）
 │   ├── core/
 │   │   ├── downloader/      # yt-dlp 封装
@@ -113,11 +113,24 @@ DeepSub/
 └──docs/                    # 截图与设计笔记
 ```
 
-跑一下离线测试（用假 translator，不联网、不加载模型，秒级完成）：
+跑一下离线测试（全部离线，不联网、不加载模型，秒级完成）：
 
 ```bash
 python tests/test_translation_flow.py
+python tests/test_gpu_detect.py
+python tests/test_asr_failure.py
 ```
+
+## 更新日志
+
+### v0.2.1
+
+- **修复：有 NVIDIA 显卡却提示「未检测到显卡」**。`nvidia-smi --query-gpu` 只要有一个字段不被当前驱动支持就会整条失败，旧代码把非标准字段 `cuda_version` 混在同一次查询里，于是直接把显卡判成不存在。现在按字段集降级重试、CUDA 版本改从输出横幅解析，并补了 `nvidia-smi` 的常见安装路径回退与超时保护。
+- **新增：识别失败会说人话**。显存不足、驱动过旧、CUDA 运行库缺失、显卡算力与程序不匹配等常见错误会被识别成「原因 + 建议」，而不是只甩一段英文输出。
+- **新增：日志落盘**。`logs/deepsub.log`（2MB × 3 轮转）记录启动环境、显卡检测结论、每一步的失败原因与识别进程的完整输出；设置 → 性能 → 诊断里可以打开日志目录、一键复制诊断信息。
+- **修复：全部语块识别失败时会静默产出 0 条字幕**，界面照样显示「识别完成」。现在会明确报错并说明原因。
+- **修复：装了 CPU 版却按 GPU 模式调用**（GPU 版缺失回退 CPU 时没有关掉 GPU 标记，会给 CPU 程序传 `-d cuda`）。
+- 界面版本号改为从 `APP_VERSION` 读取，不再写死。
 
 ## 已知不足
 

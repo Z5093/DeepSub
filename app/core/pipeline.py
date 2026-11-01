@@ -16,6 +16,7 @@ from app.core.utils.file_utils import (
     get_video_stem,
 )
 from app.common.signal_bus import signal_bus
+from app.common.logger import get_logger
 from app.common.constants import (
     PROCESSING_STEPS,
     STEP_FILE_MAP,
@@ -26,6 +27,8 @@ from app.common.constants import (
     DEFAULT_API_TIMEOUT_MS,
 )
 from app.common.config import config_manager
+
+_logger = get_logger("pipeline")
 from app.core.utils.language import (
     is_auto_language,
     normalize_language,
@@ -1006,6 +1009,14 @@ class PipelineOrchestrator:
             return None
 
     def _log(self, message: str, level: str = "info"):
+        # 同时写文件日志：用户反馈问题时可以直接把 logs/deepsub.log 发出来
+        _file_log = {
+            "error": _logger.error,
+            "warning": _logger.warning,
+            "debug": _logger.debug,
+        }.get(level, _logger.info)
+        _file_log("%s", message)
+
         signal_bus.log_message.emit(message, level)
         if self._log_callback:
             self._log_callback(message, level)

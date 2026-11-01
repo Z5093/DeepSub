@@ -25,6 +25,16 @@ EXCLUDES = [
     "faster_whisper", "ctranslate2", "transformers", "tokenizers",
     "pandas", "matplotlib", "scipy", "sklearn", "sympy",
     "IPython", "notebook", "jupyter", "pytest",
+    # pytest 时代留下的辅助库，运行时不引用；它的 hook 同样会开隔离子进程
+    "py",
+    # 纯语法高亮库，运行时用不到；它的 hook 会开隔离子进程全量扫描 lexers，
+    # 在受限环境里会被拒绝，直接排除更省事
+    "pygments",
+    # ModelScope SDK 只是「模型下载」的可选加速路径，
+    # model_download_thread 里 ImportError 会自动回退到直连 HTTP 下载。
+    # 不排除的话 PyInstaller 会把整个 modelscope 依赖树（pydantic/uvicorn/zmq…）
+    # 扫进来，构建慢十几分钟、产物还大几十 MB
+    "modelscope",
     "PyQt5.QtWebEngineWidgets", "PyQt5.QtQuick", "PyQt5.QtQml",
     "PyQt5.QtMultimediaWidgets", "PyQt5.Qt3DCore",
     "tkinter", "turtle",

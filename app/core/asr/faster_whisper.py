@@ -16,6 +16,62 @@ from app.core.utils.gpu_utils import detect_cuda, get_gpu_vram
 from app.core.utils.file_utils import get_whisper_models_dir, get_fw_gpu_dir, get_fw_cpu_exe
 from app.core.utils.ffmpeg_utils import get_ffmpeg_path
 from app.core.utils.cache_utils import generate_asr_cache_key, get_cached_asr_result, save_asr_cache
+from app.common.logger import get_logger
+
+_logger = get_logger("asr")
+
+#: GPU 版识别程序常见失败特征 → (原因, 建议)。
+#: 用户拿到的是人话，日志里同时留下原始输出，便于进一步定位。
+_FAILURE_PATTERNS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("out of memory", "cuda_error_out_of_memory", "cudaerror_memoryallocation",
+         "insufficient memory", "cublas_status_alloc_failed"),
+        "显存不足（模型太大或显卡被其它程序占用）",
+        "换更小的模型（large-v3 → medium / small），关闭游戏或浏览器等占用显存的程序；"
+        "或在「语音识别」页把运行模式改成 CPU",
+    ),
+    (
+        ("no kernel image is available", "no kernel image"),
+        "显卡算力与识别程序的编译版本不匹配",
+        "这张显卡的算力不在程序支持的范围内。请先更新 NVIDIA 驱动；"
+        "较老的显卡（如 GTX 7xx/9xx 早期型号）建议改用 CPU 版本",
+    ),
+    (
+        ("cublas", "cudnn", "cudart", "nvcuda.dll", "cuda driver library",
+         "library not found", "cannot open shared object", "could not load"),
+        "CUDA 运行库缺失或损坏",
+        "GPU 版识别程序依赖显卡驱动自带的 CUDA 运行库。请到 NVIDIA 官网重装/更新驱动，"
+        "再重新下载 GPU 版识别程序",
+    ),
+    (
+        ("driver version is insufficient", "cuda driver version",
+         "require a newer driver", "insufficient driver", "update your driver"),
+        "显卡驱动版本过旧",
+        "请把 NVIDIA 驱动更新到最新版后重试",
+    ),
+    (
+        ("invalid input features shape",),
+        "模型与识别程序的 mel 通道数不匹配",
+        "改用 large-v3 模型，或更新识别程序到较新版本",
+    ),
+    (
+        ("no such file or directory", "cannot find the file", "系统找不到指定的文件",
+         "error opening", "failed to open"),
+        "程序或模型文件缺失",
+        "在「语音识别」页重新下载识别程序与模型后重试",
+    ),
+)
+
+
+def diagnose_asr_failure(output_tail: str, return_code: int = 0) -> tuple[str, str] | None:
+    """从识别程序输出里识别失败原因，返回 (原因, 建议)，认不出则返回 None。"""
+    text = (output_tail or "").lower()
+    if not text:
+        return None
+    for keywords, reason, advice in _FAILURE_PATTERNS:
+        if any(kw in text for kw in keywords):
+            return reason, advice
+    return None
 
 _GPU_EXE_NAME = "faster-whisper-xxl.exe"
 
@@ -53,13 +109,31 @@ class FasterWhisperASR(ASRBase):
         self._exe_path = self._resolve_exe()
         self._program_name = os.path.basename(self._exe_path)
         self._process: Optional[subprocess.Popen] = None
+        _logger.info(
+            "识别初始化 | 模式=%s | 程序=%s | 存在=%s",
+            "GPU" if self._gpu_mode else "CPU", self._exe_path, self.is_available(),
+        )
 
     def _detect_gpu_mode(self) -> bool:
         info = detect_cuda()
-        if info["available"]:
-            vram = int(info["vram_free_mb"])
-            return vram >= 2048
-        return False
+        if not info["available"]:
+            _logger.info(
+                "自动模式选择 CPU | 显卡不可用 reason=%s | 设备=%s",
+                info.get("reason"), info.get("nvidia_devices"),
+            )
+            return False
+        vram = int(info["vram_free_mb"])
+        if vram < 2048:
+            _logger.info(
+                "自动模式选择 CPU | %s 可用显存 %sMB < 2048MB",
+                info.get("gpu_name"), vram,
+            )
+            return False
+        _logger.info(
+            "自动模式选择 GPU | %s | 显存 %sMB | CUDA %s",
+            info.get("gpu_name"), vram, info.get("cuda_version"),
+        )
+        return True
 
     def _resolve_exe(self) -> str:
         if self._gpu_mode:
@@ -79,15 +153,23 @@ class FasterWhisperASR(ASRBase):
 
         cpu_path = get_fw_cpu_exe()
         if os.path.isfile(cpu_path):
+            self._fallback_to_cpu("未找到 GPU 版识别程序，改用 CPU 版")
             return cpu_path
 
         fw_in_path = shutil.which("faster-whisper")
         if fw_in_path:
+            self._fallback_to_cpu("未找到 GPU 版识别程序，使用 PATH 中的 faster-whisper")
             return fw_in_path
 
         if self._gpu_mode:
             return os.path.join(get_fw_gpu_dir(), _GPU_EXE_NAME)
         return cpu_path
+
+    def _fallback_to_cpu(self, why: str) -> None:
+        """回退到 CPU 时必须同时关掉 GPU 标记，否则会给 CPU 版程序传 -d cuda。"""
+        if self._gpu_mode:
+            self._gpu_mode = False
+            _logger.warning("GPU 模式回退到 CPU：%s", why)
 
     def _is_xxl(self) -> bool:
         return "xxl" in self._program_name.lower()
@@ -575,6 +657,7 @@ class FasterWhisperASR(ASRBase):
         total_chunks = len(chunks)
         max_retries = 10
         detected_lang = ""
+        failed_chunks: list[tuple[int, str]] = []
 
         for i, chunk in enumerate(chunks):
             if log_callback:
@@ -599,6 +682,7 @@ class FasterWhisperASR(ASRBase):
                 chunk_max_retries = 3 if (chunk.packed_duration() if chunk.is_vad else chunk.duration) < 3.0 else max_retries
 
                 doc = None
+                last_error = ""
                 for attempt in range(1, chunk_max_retries + 1):
                     try:
                         doc = self.run(
@@ -619,6 +703,7 @@ class FasterWhisperASR(ASRBase):
                         )
                         break
                     except Exception as e:
+                        last_error = str(e)
                         if attempt < chunk_max_retries:
                             if log_callback:
                                 log_callback(f"语块 {i + 1} 转录失败 (第 {attempt} 次)，1 秒后重试: {e}", "warning")
@@ -626,8 +711,10 @@ class FasterWhisperASR(ASRBase):
                         else:
                             if log_callback:
                                 log_callback(f"语块 {i + 1} 转录失败，已重试 {chunk_max_retries} 次，跳过该语块: {e}", "warning")
+                            _logger.error("语块 %s 转录失败（已跳过）: %s", i + 1, e)
 
                 if doc is None:
+                    failed_chunks.append((i + 1, last_error or "未知错误"))
                     finalized.extend(pending)
                     pending = []
                     continue
@@ -688,6 +775,30 @@ class FasterWhisperASR(ASRBase):
                     pass
 
         finalized.extend(pending)
+
+        # 全部语块都失败时必须抛错。否则上层只知道「0 条字幕」，
+        # 界面还会显示「识别完成」，用户完全看不出是显存不足还是驱动问题。
+        if failed_chunks and not finalized:
+            first_no, first_err = failed_chunks[0]
+            reason_hint = diagnose_asr_failure(first_err)
+            hint = ""
+            if reason_hint:
+                hint = f"\n\n可能原因: {reason_hint[0]}\n建议: {reason_hint[1]}"
+            _logger.error(
+                "语音识别整体失败：%s/%s 个语块全部失败 | 首个错误(第 %s 块): %s",
+                len(failed_chunks), total_chunks, first_no, first_err,
+            )
+            raise RuntimeError(
+                f"全部 {total_chunks} 个语块识别失败，未能生成任何字幕。"
+                f"{hint}\n\n首个语块的原始错误:\n{first_err}"
+            )
+
+        if failed_chunks:
+            msg = (f"有 {len(failed_chunks)}/{total_chunks} 个语块识别失败并已跳过，"
+                   f"生成的字幕可能不完整（详见运行日志）")
+            if log_callback:
+                log_callback(msg, "warning")
+            _logger.warning("%s | 失败语块: %s", msg, [no for no, _ in failed_chunks])
 
         # 语义合并：修复去重后可能产生的不完整句
         finalized = self._merge_incomplete_after_dedup(finalized)
@@ -1379,6 +1490,13 @@ class FasterWhisperASR(ASRBase):
 
             creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
+            _logger.info(
+                "启动识别进程 | 设备=%s | 程序=%s",
+                "cuda" if self._gpu_mode else "cpu", self._program_name,
+            )
+            # 命令里含临时目录与模型路径，只在 debug 级别落盘
+            _logger.debug("识别命令: %s", " ".join(cmd))
+
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -1482,6 +1600,16 @@ class FasterWhisperASR(ASRBase):
 
             tail = "\n".join(output_lines[-20:]) if output_lines else "(no output)"
 
+            # 完整输出落盘，报错时能在日志里看到全部上下文（界面只展示最后 20 行）
+            _logger.error(
+                "识别进程未产出结果 | exit=%s | 设备=%s | 程序=%s | 输出行数=%s\n--- 完整输出 ---\n%s",
+                return_code,
+                "cuda" if self._gpu_mode else "cpu",
+                self._program_name,
+                len(output_lines),
+                "\n".join(output_lines) or "(无输出)",
+            )
+
             # 列出输出目录中的文件，辅助诊断
             dir_contents = []
             try:
@@ -1504,10 +1632,24 @@ class FasterWhisperASR(ASRBase):
                     f"原始错误:\n{tail}"
                 )
 
+            diagnosis = diagnose_asr_failure(tail, return_code)
+            if diagnosis:
+                reason, advice = diagnosis
+                gpu_hint = ("\n\n如果暂时不需要 GPU，可以在「语音识别」页把运行模式改成 CPU 版本。"
+                            if self._gpu_mode else "")
+                raise RuntimeError(
+                    f"识别失败（退出码 {return_code}）：{reason}\n"
+                    f"建议: {advice}{gpu_hint}\n\n"
+                    f"命令: {' '.join(cmd)}\n"
+                    f"进程输出（最后 20 行）:\n{tail}"
+                )
+
+            mode_hint = ("\n未识别出具体原因，请把 logs/deepsub.log 发给开发者。"
+                         if not output_lines else "")
             raise RuntimeError(
-                f"FasterWhisper did not produce output (exit code {return_code}).\n"
+                f"FasterWhisper 未产出结果（退出码 {return_code}）。{mode_hint}\n"
                 f"{dir_info}\n"
-                f"Command: {' '.join(cmd)}\n"
-                f"Process output (last 20 lines):\n{tail}"
+                f"命令: {' '.join(cmd)}\n"
+                f"进程输出（最后 20 行）:\n{tail}"
             )
 

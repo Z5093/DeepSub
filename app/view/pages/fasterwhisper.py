@@ -11,6 +11,7 @@ from app.common.constants import (
     MODEL_SOURCE_HUGGINGFACE, MODEL_SOURCE_MODELSCOPE, WHISPER_MODELS,
 )
 from app.common.signal_bus import signal_bus
+from app.common.logger import get_logger
 from app.common.theme import UITheme as T
 from app.components.buttons import Button
 from app.components.panels import Card, StatTile
@@ -18,6 +19,16 @@ from app.components.widgets import CheckBox, DecimalField, Field, Form, Label, N
 from app.core.asr.program_manager import FasterWhisperManager
 from app.core.utils.gpu_utils import detect_cuda
 from app.thread.model_download_thread import ModelDownloadThread
+
+_logger = get_logger("asr.page")
+
+
+def _short_reason(error, limit: int = 48) -> str:
+    """把异常压成一行短提示，完整内容留给 tooltip 与日志。"""
+    lines = [ln.strip() for ln in str(error).strip().splitlines() if ln.strip()]
+    first = lines[0] if lines else "未知错误"
+    return first if len(first) <= limit else first[:limit] + "…"
+
 
 class _ProgramDownloadThread(QThread):
     progress = pyqtSignal(int)
@@ -47,8 +58,20 @@ class _InitCheckThread(QThread):
     result_ready = pyqtSignal(dict, dict)
 
     def run(self):
-        gpu_info = detect_cuda()
-        version_info = FasterWhisperManager().get_installed_version()
+        # 检测失败也要回一次结果，否则界面会一直停在「正在检测…」
+        try:
+            gpu_info = detect_cuda()
+        except Exception:
+            gpu_info = {"available": False, "reason": "smi_failed", "nvidia_devices": []}
+        try:
+            version_info = FasterWhisperManager().get_installed_version()
+        except Exception:
+            version_info = {
+                "gpu_installed": False,
+                "cpu_installed": False,
+                "gpu_version": "",
+                "cpu_version": "",
+            }
         self.result_ready.emit(gpu_info, version_info)
 
 
@@ -421,14 +444,51 @@ class FasterWhisperPage(QWidget):
             self._card_cuda.set_value("可用")
             self._card_cuda.set_status("success")
             self._card_gpu_mem.set_value(str(info.get("vram_free_mb", 0)))
-            self._gpu_status.setText(
-                f"CUDA 可用 · {info.get('gpu_name', '未知显卡')} · CUDA {info.get('cuda_version', '?')}"
-            )
+            self._gpu_status.setText(self._gpu_detail(info))
         else:
             self._card_cuda.set_value("不可用")
             self._card_cuda.set_status("error")
             self._card_gpu_mem.set_value("—")
-            self._gpu_status.setText("未检测到 NVIDIA 显卡，将使用 CPU 版本运行")
+            self._gpu_status.setText(self._gpu_failure_hint(info))
+
+    @staticmethod
+    def _gpu_detail(info) -> str:
+        parts = [f"CUDA 可用 · {info.get('gpu_name') or '未知显卡'}"]
+        cuda = info.get("cuda_version") or ""
+        if cuda:
+            parts.append(f"CUDA {cuda}")
+        driver = info.get("driver_version") or ""
+        if driver:
+            parts.append(f"驱动 {driver}")
+        free = info.get("vram_free_mb", 0)
+        total = info.get("vram_total_mb", 0)
+        if total:
+            parts.append(f"显存 {free}/{total} MB")
+        count = int(info.get("gpu_count", 1) or 1)
+        if count > 1:
+            parts.append(f"共 {count} 张显卡")
+        return " · ".join(parts)
+
+    @staticmethod
+    def _gpu_failure_hint(info) -> str:
+        reason = info.get("reason", "")
+        devices = [d for d in (info.get("nvidia_devices") or []) if d]
+        name = devices[0] if devices else (info.get("gpu_name") or "")
+
+        if reason == "smi_not_found":
+            if name:
+                return (f"检测到 {name}，但找不到 nvidia-smi；"
+                        "请更新或重装 NVIDIA 驱动后点「重新检测 GPU」（当前使用 CPU 版本）")
+            return "未找到 nvidia-smi，请确认已正确安装 NVIDIA 显卡驱动（当前使用 CPU 版本）"
+        if reason == "smi_failed":
+            prefix = f"检测到 {name}，" if name else ""
+            return (f"{prefix}nvidia-smi 读取失败，通常与驱动异常或版本过旧有关；"
+                    "请更新 NVIDIA 驱动后点「重新检测 GPU」（当前使用 CPU 版本）")
+        if reason == "no_gpu":
+            return "nvidia-smi 未列出可用的 NVIDIA 显卡，当前使用 CPU 版本运行"
+        if name:
+            return f"未检测到可用的 CUDA 环境（{name}），当前使用 CPU 版本运行"
+        return "未检测到 NVIDIA 显卡，当前使用 CPU 版本运行"
 
     def _download_program(self, version):
         if self._program_download_thread and self._program_download_thread.isRunning():
@@ -473,6 +533,12 @@ class FasterWhisperPage(QWidget):
         btn.setText("下载 GPU 版本" if version == "gpu" else "下载 CPU 版本")
         self._card_status.set_value("下载失败")
         self._card_status.set_status("error")
+
+        _logger.error("识别程序下载失败 (%s): %s", version, error)
+        status_label = self._gpu_status_label if version == "gpu" else self._cpu_status_label
+        status_label.setText(f"下载失败：{_short_reason(error)}")
+        status_label.setToolTip(f"{error}\n\n完整记录见「设置 → 性能 → 诊断」里的日志文件")
+        status_label.show()
 
     def _on_program_delete_clicked(self, version):
         label = "GPU 版本" if version == "gpu" else "CPU 版本"
@@ -590,11 +656,13 @@ class FasterWhisperPage(QWidget):
 
     def _on_model_download_failed(self, model_id, error):
         FasterWhisperPage._is_downloading = False
+        _logger.error("模型下载失败 (%s): %s", model_id, error)
         for row, (mid, info) in enumerate(WHISPER_MODELS.items()):
             if mid == model_id:
                 item = self._model_table.item(row, 2)
                 if item:
                     item.setText("下载失败")
+                    item.setToolTip(f"{error}\n\n完整记录见「设置 → 性能 → 诊断」里的日志文件")
                 if model_id in self._model_download_btns:
                     self._model_download_btns[model_id].setEnabled(True)
                     self._model_download_btns[model_id].setText("重试")

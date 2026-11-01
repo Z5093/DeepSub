@@ -1,9 +1,11 @@
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QHBoxLayout, QLabel, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app.common.constants import DEFAULT_API_TIMEOUT_MS, SUPPORTED_BROWSERS
+from app.common.logger import collect_diagnostics, get_log_dir, get_log_file, set_debug
 from app.common.signal_bus import signal_bus
 from app.common.theme import UITheme as T
 from app.components.buttons import Button
@@ -13,10 +15,24 @@ from app.components.widgets import (
 )
 
 
+class _DiagnosticsThread(QThread):
+    """收集诊断信息要跑 nvidia-smi，放后台线程避免界面卡住。"""
+
+    ready = pyqtSignal(str)
+
+    def run(self):
+        try:
+            text = collect_diagnostics()
+        except Exception as exc:  # noqa: BLE001 - 诊断失败也要给用户结果
+            text = f"诊断信息生成失败: {exc}"
+        self.ready.emit(text)
+
+
 class SettingsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("PageRoot")
+        self._diag_thread = None
         self._setup_ui()
         self._init_config()
 
@@ -242,9 +258,31 @@ class SettingsPage(QWidget):
         perf_card.add_widget(Field("缓存上限", self._cache_size_spin))
         form.add_widget(perf_card)
 
-        debug_card = Card("诊断")
+        debug_card = Card("诊断", "日志会记录每一步的失败原因；出问题时可以把日志文件发给开发者")
         self._debug_check = CheckBox("输出调试日志（记录每个步骤的耗时与中间状态）")
         debug_card.add_widget(self._debug_check)
+
+        log_path_label = Label(f"日志位置：{get_log_file()}", "muted")
+        log_path_label.setWordWrap(True)
+        log_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_card.add_widget(log_path_label)
+
+        log_row = QHBoxLayout()
+        log_row.setSpacing(8)
+        self._open_log_btn = Button("打开日志文件夹")
+        self._open_log_btn.clicked.connect(self._on_open_log_dir)
+        log_row.addWidget(self._open_log_btn)
+
+        self._copy_diag_btn = Button("复制诊断信息", variant="primary")
+        self._copy_diag_btn.setToolTip("把显卡、识别程序、模型和最近日志汇总成一段文本，方便反馈问题")
+        self._copy_diag_btn.clicked.connect(self._on_copy_diagnostics)
+        log_row.addWidget(self._copy_diag_btn)
+        log_row.addStretch(1)
+        debug_card.add_layout(log_row)
+
+        self._diag_hint = Label("", "muted")
+        self._diag_hint.hide()
+        debug_card.add_widget(self._diag_hint)
         form.add_widget(debug_card)
 
         proxy_card = Card("代理")
@@ -357,6 +395,7 @@ class SettingsPage(QWidget):
         config_manager.set("performance", "thread_count", self._thread_count_spin.value())
         config_manager.set("performance", "cache_size_mb", self._cache_size_spin.value())
         config_manager.set("performance", "debug_mode", self._debug_check.isChecked())
+        set_debug(self._debug_check.isChecked())
 
         proxy_map = {0: "system", 1: "http", 2: "socks5", 3: "none"}
         config_manager.set("general", "proxy_type",
@@ -463,6 +502,28 @@ class SettingsPage(QWidget):
             self._proxy_addr_input.setText(f"{proxy_host}:{proxy_port}")
         else:
             self._proxy_addr_input.setText("127.0.0.1:7890")
+
+    # ------------------------------------------------------------ 日志/诊断
+    def _on_open_log_dir(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(get_log_dir()))
+
+    def _on_copy_diagnostics(self):
+        if getattr(self, "_diag_thread", None) and self._diag_thread.isRunning():
+            return
+        self._copy_diag_btn.setEnabled(False)
+        self._copy_diag_btn.setText("正在收集…")
+        self._diag_hint.hide()
+
+        self._diag_thread = _DiagnosticsThread(self)
+        self._diag_thread.ready.connect(self._on_diagnostics_ready)
+        self._diag_thread.start()
+
+    def _on_diagnostics_ready(self, text: str):
+        QApplication.clipboard().setText(text)
+        self._copy_diag_btn.setEnabled(True)
+        self._copy_diag_btn.setText("复制诊断信息")
+        self._diag_hint.setText("已复制到剪贴板，可直接粘贴给开发者")
+        self._diag_hint.show()
 
     def _open_guide(self):
         from app.view.pages.wizard import GuideDialog
