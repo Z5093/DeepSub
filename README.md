@@ -79,11 +79,12 @@ python scripts/build_exe.py --no-bin # 不拷贝 ffmpeg 等大文件，只出程
 
 打包用的是 PyInstaller 的 onedir 模式，而不是单文件：`resource/` 与 `config/` 放在 exe 同级，用户可以直接替换 ffmpeg / yt-dlp、改配置；`models/faster-whisper`、`tools/` 在首次使用时按需下载。
 
-构建脚本会做三件容易漏的事，并在最后跑一遍产物自检（缺文件或 `yt-dlp.exe` 是 pip 启动壳会直接失败）：
+构建脚本会做四件容易漏的事，并在最后跑一遍产物自检（缺文件、`yt-dlp.exe` 是 pip 启动壳、或产物里混进运行期数据都会直接失败）：
 
 1. 把 `resource/{icons,fonts,styles}` 和 `resource/bin` 拷到 exe 同级；
 2. 把 `models/silero-vad/silero_vad.onnx`（2.3MB 静音检测模型）一并带上——不带的话程序会去 GitHub 现下，下不动就静默退化成定长分块；
-3. `models/faster-whisper`（3.4GB）**不打进包**，由「语音识别」页按需下载。
+3. `models/faster-whisper`（3.4GB）**不打进包**，由「语音识别」页按需下载；
+4. 清掉产物里混进的运行期数据（`config/settings.json`、`logs/`、`cache/`），打 zip 时再过滤一遍。打包后顺手点一下 exe 试跑，配置就会被写进去，再打包等于把「已初始化」的状态发给所有人——用户首次启动会直接跳过新手引导。`tools/`、`models/faster-whisper`、`downloads/` 里若有内容，自检会报错而不是默默带上。
 
 实测产物（v0.2.1）：`DeepSub.exe` 约 11 MB，整个目录约 670 MB（其中 487 MB 是 gyan full build 的 ffmpeg + ffprobe），打成 zip 后 276 MB。
 

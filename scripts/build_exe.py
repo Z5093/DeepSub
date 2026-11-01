@@ -42,6 +42,31 @@ REQUIRED_ARTIFACTS = (
     (os.path.join("models", "silero-vad", "silero_vad.onnx"), 1_500_000, "Silero VAD 模型"),
 )
 
+#: 运行期才产生、绝不能进发布包的内容（相对 APP_DIR）。
+#: 踩过的坑：打包后顺手点了 exe 试一下，exe 会写 config/settings.json 与 logs/，
+#: 再打 zip 就把「已初始化」的状态发给了所有人 —— 用户首次启动直接跳过新手引导。
+#: 体积大的（tools/ 里的识别程序、models/faster-whisper 的 3.4GB 模型）同理。
+USER_DATA_LIGHT = (
+    os.path.join("config", "settings.json"),
+    "logs",
+    "cache",
+)
+USER_DATA_HEAVY = (
+    "tools",
+    os.path.join("models", "faster-whisper"),
+    "downloads",
+)
+
+
+def is_user_data(rel_path: str) -> bool:
+    """判断相对 APP_DIR 的路径是否属于运行期数据。"""
+    rel = rel_path.replace("/", os.sep)
+    for prefix in USER_DATA_LIGHT + USER_DATA_HEAVY:
+        if rel == prefix or rel.startswith(prefix + os.sep):
+            return True
+    return False
+
+
 
 def read_version() -> str:
     path = os.path.join(ROOT, "app", "common", "constants.py")
@@ -106,6 +131,39 @@ def copy_tree(src: str, dst: str) -> None:
             shutil.copy2(os.path.join(base, name), os.path.join(target, name))
 
 
+def find_user_data() -> list[tuple[str, int]]:
+    """列出 APP_DIR 里混进的运行期数据：(相对路径, 字节数)。"""
+    found: list[tuple[str, int]] = []
+    for base, _dirs, files in os.walk(APP_DIR):
+        for name in files:
+            full = os.path.join(base, name)
+            rel = os.path.relpath(full, APP_DIR)
+            if is_user_data(rel):
+                try:
+                    found.append((rel, os.path.getsize(full)))
+                except OSError:
+                    pass
+    return found
+
+
+def purge_user_data() -> list[str]:
+    """清掉轻量的运行期文件（配置 / 日志 / 缓存）。
+
+    体积大的（tools/ 里的识别程序、faster-whisper 模型）不擅自删 —— 可能是开发者
+    自己下的东西，交给自检报错，让人自己决定。
+    """
+    removed: list[str] = []
+    for rel, _size in find_user_data():
+        if any(rel == p or rel.startswith(p + os.sep) for p in USER_DATA_HEAVY):
+            continue
+        try:
+            os.remove(os.path.join(APP_DIR, rel))
+            removed.append(rel)
+        except OSError:
+            pass
+    return removed
+
+
 def assemble(with_bin: bool) -> None:
     """把运行时需要、但不该塞进 exe 的东西放到 exe 同级目录。"""
     resource_dst = os.path.join(APP_DIR, "resource")
@@ -150,24 +208,44 @@ def assemble(with_bin: bool) -> None:
     with open(os.path.join(APP_DIR, "使用说明.txt"), "w", encoding="utf-8") as f:
         f.write(readme)
 
+    # 上一步如果手动跑过 exe，配置和日志已经写进去了，这里兜底清掉
+    removed = purge_user_data()
+    if removed:
+        print(f"  已清理 {len(removed)} 个运行期文件（{removed[0]} 等）")
 
-def verify() -> list[str]:
+
+def verify(require_bin: bool = True) -> list[str]:
     """检查产物是否齐活。返回问题列表，空列表表示通过。
 
-    曾经踩过的坑：resource/bin/yt-dlp.exe 被 pip 自动升级成了 100KB 的启动壳，
-    在构建机上能跑、发出去就报错。这里用体积阈值把这类问题挡在发布前。
+    曾经踩过的坑：
+    - resource/bin/yt-dlp.exe 被 pip 自动升级成了 100KB 的启动壳，在构建机上能跑、
+      发出去就报错。这里用体积阈值把这类问题挡在发布前。
+    - 打包后顺手点了 exe 试跑，配置和日志被写进产物，打进 zip 后用户首次启动
+      直接跳过新手引导。运行期数据因此也纳入自检。
     """
     problems: list[str] = []
-    for rel, min_size, label in REQUIRED_ARTIFACTS:
-        path = os.path.join(APP_DIR, rel)
-        if not os.path.isfile(path):
-            problems.append(f"缺少 {label}: {rel}")
-            continue
-        size = os.path.getsize(path)
-        if size < min_size:
-            problems.append(
-                f"{label} 体积异常: {rel} 只有 {size / 1024 / 1024:.2f} MB（应 ≥ {min_size / 1024 / 1024:.1f} MB）"
-            )
+    if require_bin:
+        for rel, min_size, label in REQUIRED_ARTIFACTS:
+            path = os.path.join(APP_DIR, rel)
+            if not os.path.isfile(path):
+                problems.append(f"缺少 {label}: {rel}")
+                continue
+            size = os.path.getsize(path)
+            if size < min_size:
+                problems.append(
+                    f"{label} 体积异常: {rel} 只有 {size / 1024 / 1024:.2f} MB（应 ≥ {min_size / 1024 / 1024:.1f} MB）"
+                )
+
+    # 运行期数据混进来会改变用户看到的行为（典型：settings.json 让新手引导被跳过）
+    leftovers = find_user_data()
+    if leftovers:
+        total = sum(s for _rel, s in leftovers) / 1024 / 1024
+        sample = "、".join(rel for rel, _s in leftovers[:5])
+        more = "…" if len(leftovers) > 5 else ""
+        problems.append(
+            f"产物里混入运行期数据 {len(leftovers)} 个（{total:.1f} MB）：{sample}{more}"
+            "（发布前请删除，或重新构建）"
+        )
     return problems
 
 
@@ -175,11 +253,19 @@ def make_zip(version: str) -> str:
     zip_path = os.path.join(DIST, f"DeepSub-v{version}-win64.zip")
     if os.path.exists(zip_path):
         os.remove(zip_path)
+    skipped = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for base, _dirs, files in os.walk(APP_DIR):
             for name in files:
                 full = os.path.join(base, name)
+                rel = os.path.relpath(full, APP_DIR)
+                # 双保险：即使 assemble 之后有人手动跑过 exe，压缩包也不带这些
+                if is_user_data(rel) or name.lower().endswith(SKIP_SUFFIXES):
+                    skipped += 1
+                    continue
                 zf.write(full, os.path.relpath(full, DIST))
+    if skipped:
+        print(f"  已跳过 {skipped} 个运行期/备份文件")
     return zip_path
 
 
@@ -231,7 +317,7 @@ def main() -> int:
     if args.no_bin:
         print("提示：本次未拷贝 resource/bin，运行前请自行放入 ffmpeg / yt-dlp 等工具")
 
-    problems = [] if args.no_bin else verify()
+    problems = verify(require_bin=not args.no_bin)
     if problems:
         print("\n产物自检未通过：", file=sys.stderr)
         for item in problems:
@@ -239,6 +325,7 @@ def main() -> int:
         return 2
     if not args.no_bin:
         print("产物自检通过：ffmpeg / ffprobe / yt-dlp / 7z / silero-vad 均已就位")
+    print("产物自检通过：未混入 config / logs / tools 等运行期数据")
 
     if args.zip:
         zip_path = make_zip(version)
