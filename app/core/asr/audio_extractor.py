@@ -14,7 +14,7 @@ class AudioExtractor:
 
     def extract(self, video_path: str, output_path: Optional[str] = None) -> tuple[bool, str]:
         if not os.path.isfile(video_path):
-            return False, f"视频文件不存在: {video_path}"
+            return False, f"文件不存在: {video_path}"
 
         if output_path is None:
             output_path = get_audio_output_path(video_path)
@@ -69,12 +69,17 @@ class AudioExtractor:
 
         file_name = info.get("file_name", "未知")
 
+        # 纯音频输入没有视频轨：codec 与宽高都为空，此时不显示分辨率/视频编码。
+        is_audio_only = not (info.get("codec") or "") and not (width and height)
+
         lines = [
             f"文件: {file_name}",
+            f"类型: {'纯音频' if is_audio_only else '视频'}",
             f"时长: {duration_display}",
-            f"分辨率: {resolution}",
-            f"视频编码: {codec}",
-            f"音频编码: {audio_codec}",
-            f"文件大小: {size_display}",
         ]
+        if not is_audio_only:
+            lines.append(f"分辨率: {resolution}")
+            lines.append(f"视频编码: {codec}")
+        lines.append(f"音频编码: {audio_codec}")
+        lines.append(f"文件大小: {size_display}")
         return "\n".join(lines)

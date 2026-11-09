@@ -267,7 +267,7 @@ class DropZone(QFrame):
     clicked = pyqtSignal()
     files_dropped = pyqtSignal(list)
 
-    def __init__(self, title: str = "拖入视频或字幕文件", subtitle: str = "", parent=None):
+    def __init__(self, title: str = "拖入视频、音频或字幕文件", subtitle: str = "", parent=None):
         super().__init__(parent)
         self._title = title
         self._subtitle = subtitle

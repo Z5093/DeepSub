@@ -24,6 +24,13 @@ _logger = get_logger("asr")
 #: 用户拿到的是人话，日志里同时留下原始输出，便于进一步定位。
 _FAILURE_PATTERNS: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (
+        ("unknown model not found", "try these known models", "model not found at"),
+        "识别程序找不到指定的模型目录",
+        "XXL 版会把 -m 的值当模型名，拼到 <程序目录>/_models/faster-whisper-<名字> 下，"
+        "传完整路径必然失败。请确认程序目录可写（不要放在 Program Files），"
+        "或在「语音识别」页重新下载模型后重试",
+    ),
+    (
         ("out of memory", "cuda_error_out_of_memory", "cudaerror_memoryallocation",
          "insufficient memory", "cublas_status_alloc_failed"),
         "显存不足（模型太大或显卡被其它程序占用）",
@@ -205,25 +212,46 @@ class FasterWhisperASR(ASRBase):
             return _EXE_DISTIL_PREFIX + model_name[len("distil-"):]
         return _EXE_MODEL_PREFIX + model_name
 
-    def _ensure_exe_model_available(self, resolved_model: str, model_dir: str, original_model: str = "") -> None:
-        if self._is_xxl():
-            return
+    def _ensure_exe_model_available(self, resolved_model: str, model_dir: str, original_model: str = "") -> bool:
+        """在识别程序的 `_models` 下准备 `faster-whisper-<模型名>` 目录。
 
+        XXL 版只接受「模型名」，会自己在 exe 同级 `_models` 下按
+        `faster-whisper-<名字>` 找目录；直接把绝对路径塞给 `-m` 会被当成名字
+        拼成 `_models/faster-whisper-E:\\...\\large-v3`，必然失败。因此这里统一
+        用目录联接（junction）把用户的模型目录挂到程序期望的位置。
+
+        返回 True 表示 `_models/faster-whisper-<名字>` 已就绪。
+        """
         exe_dir = os.path.dirname(self._exe_path)
         exe_models_dir = os.path.join(exe_dir, "_models")
-        os.makedirs(exe_models_dir, exist_ok=True)
 
         exe_dir_name = self._exe_model_dir_name(resolved_model)
         exe_model_path = os.path.join(exe_models_dir, exe_dir_name)
 
         if os.path.isdir(exe_model_path):
-            return
+            return True
+
+        # 断掉的联接或上次失败留下的残留会让 mklink 报「文件已存在」
+        if os.path.lexists(exe_model_path):
+            try:
+                os.rmdir(exe_model_path)
+            except OSError:
+                try:
+                    os.remove(exe_model_path)
+                except OSError:
+                    return False
 
         source_path = os.path.join(model_dir, resolved_model)
         if not os.path.isdir(source_path) and original_model:
             source_path = os.path.join(model_dir, original_model)
         if not os.path.isdir(source_path):
-            return
+            return False
+
+        try:
+            os.makedirs(exe_models_dir, exist_ok=True)
+        except OSError as e:
+            _logger.warning("无法创建 %s：%s", exe_models_dir, e)
+            return False
 
         try:
             if os.name == "nt":
@@ -238,8 +266,14 @@ class FasterWhisperASR(ASRBase):
                 )
             else:
                 os.symlink(source_path, exe_model_path, target_is_directory=True)
-        except (subprocess.CalledProcessError, OSError):
+        except (subprocess.CalledProcessError, OSError) as e:
+            # XXL 的模型有数 GB，复制一份既慢又占空间，这里不做拷贝兜底。
+            if self._is_xxl():
+                _logger.warning("创建模型目录联接失败：%s | %s", exe_model_path, e)
+                return False
             shutil.copytree(source_path, exe_model_path)
+
+        return os.path.isdir(exe_model_path)
 
     def _get_model_n_mels(self, model_name: str, model_dir: str) -> int | None:
         import json
@@ -357,22 +391,34 @@ class FasterWhisperASR(ASRBase):
                 self._ensure_exe_model_available(resolved_model, str(model_dir), model)
             cmd.extend(["-m", resolved_model])
         else:
-            use_local_path = False
+            # XXL 版只认模型名：它自己会去 <exe目录>/_models/faster-whisper-<名字>
+            # 找模型，传绝对路径会被拼成 "_models/faster-whisper-E:\...\large-v3"。
+            # 所以先把用户的模型目录联接（junction）到程序期望的位置，再传名字。
+            exe_ready = False
             if model_dir:
-                resolved_model_path = os.path.join(str(model_dir), resolved_model)
-                if os.path.isdir(resolved_model_path):
-                    cmd.extend(["-m", resolved_model_path])
-                    use_local_path = True
-                else:
-                    original_model_path = os.path.join(str(model_dir), model)
-                    if os.path.isdir(original_model_path):
-                        cmd.extend(["-m", original_model_path])
-                        use_local_path = True
+                exe_ready = self._ensure_exe_model_available(
+                    resolved_model, str(model_dir), model
+                )
 
-            if not use_local_path:
+            if exe_ready:
                 cmd.extend(["-m", resolved_model])
+            else:
+                # 兜底：极少数旧版程序支持直接给目录路径，保留该写法并留日志。
+                local_path = ""
                 if model_dir:
-                    cmd.extend(["--model_dir", str(model_dir)])
+                    for candidate in (resolved_model, model):
+                        p = os.path.join(str(model_dir), candidate)
+                        if os.path.isdir(p):
+                            local_path = p
+                            break
+                if local_path:
+                    _logger.warning(
+                        "模型目录联接未就绪，回退为直接传模型路径（XXL 可能不支持）: %s",
+                        local_path,
+                    )
+                    cmd.extend(["-m", local_path])
+                else:
+                    cmd.extend(["-m", resolved_model])
 
         cmd.extend(["--print_progress"])
 

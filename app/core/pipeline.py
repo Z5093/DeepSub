@@ -115,11 +115,11 @@ class PipelineOrchestrator:
             return False
 
         if not self._video_path:
-            self._log("未设置视频文件", "error")
+            self._log("未设置媒体文件", "error")
             return False
 
         if not os.path.isfile(self._video_path):
-            self._log(f"视频文件不存在: {self._video_path}", "error")
+            self._log(f"媒体文件不存在: {self._video_path}", "error")
             return False
 
         self._running = True
@@ -375,11 +375,24 @@ class PipelineOrchestrator:
 
     def _step_audio(self) -> bool:
         from app.core.asr.audio_extractor import AudioExtractor
+        from app.core.utils.ffmpeg_utils import probe_stream_kinds
 
         if not os.path.isfile(self._video_path):
-            self._log(f"视频文件不存在: {self._video_path}", "error")
-            signal_bus.pipeline_step_error.emit("audio", "视频文件不存在")
+            self._log(f"媒体文件不存在: {self._video_path}", "error")
+            signal_bus.pipeline_step_error.emit("audio", "媒体文件不存在")
             return False
+
+        # 输入可以是视频也可以是纯音频，这里按实际轨道决定后续行为。
+        has_video, has_audio = probe_stream_kinds(self._video_path)
+        if has_video and not has_audio:
+            msg = "该文件没有音频轨，无法识别语音（请确认视频本身带声音）"
+            self._log(msg, "error")
+            signal_bus.pipeline_step_error.emit("audio", msg)
+            return False
+        if has_audio and not has_video:
+            self._log("输入为纯音频，跳过视频轨，直接解码音轨", "info")
+        elif not has_audio:
+            self._log("未能探测到轨道信息，仍尝试直接解码", "warning")
 
         audio_path = get_audio_output_path(self._video_path)
         signal_bus.audio_extract_started.emit(self._video_path)

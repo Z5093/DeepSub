@@ -5,7 +5,14 @@ from PyQt5.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
 
-from app.common.constants import BCP47_LANGUAGES, SUPPORTED_SUBTITLE_FORMATS, SUPPORTED_VIDEO_FORMATS, WHISPER_MODELS
+from app.common.constants import (
+    BCP47_LANGUAGES,
+    SUPPORTED_AUDIO_FORMATS,
+    SUPPORTED_MEDIA_FORMATS,
+    SUPPORTED_SUBTITLE_FORMATS,
+    SUPPORTED_VIDEO_FORMATS,
+    WHISPER_MODELS,
+)
 from app.common.signal_bus import signal_bus
 from app.common.theme import UITheme as T
 from app.components.buttons import Button, Switch
@@ -17,6 +24,11 @@ from app.components.widgets import (
 from app.core.asr.audio_extractor import AudioExtractor
 from app.core.pipeline import PipelineOrchestrator
 from app.core.subtitle.converter import SubtitleConverter
+
+#: 扩展名集合，用于判断拖入/选中的文件该走字幕流程还是媒体（视频/音频）流程。
+_SUBTITLE_EXTS = {p.lstrip("*").lower() for p in SUPPORTED_SUBTITLE_FORMATS}
+_AUDIO_EXTS = {p.lstrip("*").lower() for p in SUPPORTED_AUDIO_FORMATS}
+_MEDIA_EXTS = {p.lstrip("*").lower() for p in SUPPORTED_MEDIA_FORMATS}
 
 _STEP_DISPLAY_NAMES = {
     "download": "视频下载",
@@ -102,8 +114,8 @@ class WorkspacePage(QWidget):
 
         input_card = Card()
         self._drop_zone = DropZone(
-            "拖入视频或字幕文件",
-            "支持 mp4 / mkv / mov 视频，与 srt / ass / vtt 字幕",
+            "拖入视频、音频或字幕文件",
+            "支持 mp4 / mkv 等视频，mp3 / wav / m4a 等音频，与 srt / ass / vtt 字幕",
         )
         self._drop_zone.clicked.connect(self._on_browse)
         self._drop_zone.files_dropped.connect(self._on_files_dropped)
@@ -142,13 +154,15 @@ class WorkspacePage(QWidget):
             stats.addWidget(tile)
         left.addLayout(stats)
 
-        info_card = Card("视频信息")
-        self._video_info_label = Label("尚未加载视频文件", "muted")
+        info_card = Card("媒体信息")
+        self._video_info_label = Label("尚未加载视频或音频文件", "muted")
         self._video_info_label.setWordWrap(True)
         self._video_info_label.setMinimumHeight(44)
         self._video_info_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         info_card.add_widget(self._video_info_label, 1)
-        self._info_hint = Label("选择文件后会显示时长、分辨率、编码与字幕条数", "hint")
+        self._info_hint = Label(
+            "选择文件后会显示时长、编码与字幕条数；视频还会显示分辨率", "hint"
+        )
         self._info_hint.setWordWrap(True)
         info_card.add_widget(self._info_hint)
         left.addWidget(info_card, 1)
@@ -224,11 +238,17 @@ class WorkspacePage(QWidget):
     # -------------------------------------------------------------- 交互
     def _on_browse(self):
         video_ext = " ".join(SUPPORTED_VIDEO_FORMATS)
+        audio_ext = " ".join(SUPPORTED_AUDIO_FORMATS)
+        media_ext = " ".join(SUPPORTED_MEDIA_FORMATS)
         sub_ext = " ".join(SUPPORTED_SUBTITLE_FORMATS)
-        all_ext = f"{video_ext} {sub_ext}"
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择文件", "", f"所有支持格式 ({all_ext});;视频 ({video_ext});;字幕 ({sub_ext})"
+        filters = (
+            f"所有支持格式 ({media_ext} {sub_ext});;"
+            f"视频 ({video_ext});;"
+            f"音频 ({audio_ext});;"
+            f"字幕 ({sub_ext});;"
+            "所有文件 (*)"
         )
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择文件", "", filters)
         if file_path:
             self._file_path.setText(file_path)
             self.file_selected.emit(file_path)
@@ -309,18 +329,29 @@ class WorkspacePage(QWidget):
         self._update_cards()
 
         ext = os.path.splitext(file_path)[1].lower()
-        subtitle_exts = {".srt", ".vtt", ".ass", ".ssa"}
 
-        if ext in subtitle_exts:
+        if ext in _SUBTITLE_EXTS:
             self._handle_subtitle_file(file_path)
+        elif ext in _MEDIA_EXTS:
+            self._handle_media_file(file_path)
         else:
-            self._handle_video_file(file_path)
+            self._video_file_path = ""
+            self._subtitle_doc = None
+            self._video_info_label.setText("不支持的文件格式")
+            self._terminal.append_line(
+                f"不支持的文件格式：{os.path.basename(file_path)}"
+                "（支持的视频/音频与字幕格式见拖拽区说明）",
+                "error",
+            )
 
-    def _handle_video_file(self, file_path):
+    def _handle_media_file(self, file_path):
         self._video_file_path = file_path
         self._subtitle_doc = None
+        is_audio = os.path.splitext(file_path)[1].lower() in _AUDIO_EXTS
         self._video_info_label.set_kind("mono")
-        self._video_info_label.setText("正在读取视频信息…")
+        self._video_info_label.setText(
+            "正在读取音频信息…" if is_audio else "正在读取视频信息…"
+        )
 
         extractor = AudioExtractor()
         info = extractor.get_video_info(file_path)
@@ -328,10 +359,19 @@ class WorkspacePage(QWidget):
         if info:
             self._info_hint.setVisible(False)
             self._video_info_label.setText(extractor.format_info_display(info))
-            self._terminal.append_line(f"视频已加载：{os.path.basename(file_path)}", "success")
+            kind = "音频" if is_audio else "视频"
+            self._terminal.append_line(
+                f"{kind}已加载：{os.path.basename(file_path)}", "success"
+            )
+            if is_audio:
+                self._terminal.append_line(
+                    "输入为音频文件，跳过视频轨，直接解码音轨识别", "dim"
+                )
         else:
-            self._video_info_label.setText("无法读取视频信息")
-            self._terminal.append_line(f"无法读取视频信息：{os.path.basename(file_path)}", "error")
+            self._video_info_label.setText("无法读取媒体信息")
+            self._terminal.append_line(
+                f"无法读取媒体信息：{os.path.basename(file_path)}", "error"
+            )
 
     def _handle_subtitle_file(self, file_path):
         self._video_file_path = ""
@@ -359,7 +399,7 @@ class WorkspacePage(QWidget):
             return
 
         if not self._video_file_path and not self._subtitle_doc:
-            self._terminal.append_line("请先选择视频或字幕文件", "error")
+            self._terminal.append_line("请先选择视频、音频或字幕文件", "error")
             return
 
         self.start_processing.emit()

@@ -1,13 +1,20 @@
 APP_NAME = "DeepSub"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 APP_AUTHOR = "DeepSub"
 
 SUPPORTED_VIDEO_FORMATS = [
-    "*.mp4", "*.mkv", "*.avi", "*.mov", "*.wmv", "*.flv",
+    "*.mp4", "*.mkv", "*.avi", "*.mov", "*.wmv", "*.flv", "*.webm", "*.m4v", "*.ts",
 ]
 
+SUPPORTED_AUDIO_FORMATS = [
+    "*.mp3", "*.wav", "*.m4a", "*.aac", "*.flac", "*.ogg", "*.opus", "*.wma", "*.amr", "*.aiff",
+]
+
+#: 视频 + 音频的合集：都是「可以从中提取音轨去识别」的媒体文件。
+SUPPORTED_MEDIA_FORMATS = SUPPORTED_VIDEO_FORMATS + SUPPORTED_AUDIO_FORMATS
+
 SUPPORTED_SUBTITLE_FORMATS = [
-    "*.srt", "*.ass", "*.vtt",
+    "*.srt", "*.ass", "*.ssa", "*.vtt",
 ]
 
 WHISPER_MODELS = {

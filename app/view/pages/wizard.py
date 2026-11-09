@@ -141,7 +141,7 @@ class WelcomePage(WizardPageBase):
         )
         layout.addWidget(title)
 
-        subtitle = QLabel("把视频变成准确的双语字幕，全程在本机完成")
+        subtitle = QLabel("把视频或音频变成准确的双语字幕，全程在本机完成")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet(
             f"color: {T.TEXT_SECONDARY}; font-size: {T.SIZE_HEADLINE}px; background: transparent;"
@@ -760,7 +760,7 @@ class CompletePage(WizardPageBase):
         )
         layout.addWidget(title)
 
-        desc = QLabel("把视频拖进工作台，识别 → 分段 → 翻译 → 对齐 → 导出 会依次执行。")
+        desc = QLabel("把视频或音频拖进工作台，识别 → 分段 → 翻译 → 对齐 → 导出 会依次执行。")
         desc.setAlignment(Qt.AlignCenter)
         desc.setStyleSheet(
             f"color: {T.TEXT_SECONDARY}; font-size: {T.SIZE_BODY}px; background: transparent;"
