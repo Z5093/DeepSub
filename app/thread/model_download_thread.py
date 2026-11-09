@@ -4,6 +4,8 @@ import os
 import json
 import shutil
 
+from app.core.asr.whisper_model_files import ensure_preprocessor_config
+
 
 class ModelDownloadThread(QThread):
     progress = pyqtSignal(str, int)
@@ -51,14 +53,22 @@ class ModelDownloadThread(QThread):
 
     MODEL_FILES = [
         "config.json",
+        # 128 维模型（large-v3 / large-v3-turbo）必需：faster-whisper 靠它决定
+        # mel 特征维度，漏掉就会报 Invalid input features shape（80 vs 128）。
+        "preprocessor_config.json",
         "model.bin",
         "tokenizer.json",
         "vocabulary.json",
         "vocabulary.txt",
     ]
 
+    #: 某些镜像仓库里没有这些文件（例如 HF 只有 vocabulary.txt、早期镜像是 80 维），
+    #: 下载源返回 404 时跳过即可，不应让整次安装失败。
+    OPTIONAL_FILES = {"preprocessor_config.json", "vocabulary.json", "vocabulary.txt"}
+
     MIN_FILE_SIZES = {
         "config.json": 100,
+        "preprocessor_config.json": 100,
         "model.bin": 1024,
         "tokenizer.json": 100,
         "vocabulary.json": 100,
@@ -83,6 +93,10 @@ class ModelDownloadThread(QThread):
             model_path = os.path.join(self._model_dir, self._model_id)
 
             if os.path.exists(model_path) and os.path.exists(os.path.join(model_path, "model.bin")):
+                # 已安装也可能「不完整」：早期下载清单漏了 preprocessor_config.json，
+                # 导致 large-v3 装上却一识别就报 mel 维度不匹配。老用户点一次
+                # 下载/修复就能就地补上，不用重下 3GB。
+                self._repair_installed_model(model_path)
                 self.completed.emit(self._model_id)
                 return
 
@@ -147,6 +161,17 @@ class ModelDownloadThread(QThread):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             return False
 
+    def _repair_installed_model(self, model_path: str) -> None:
+        """补齐已安装模型目录里缺的特征配置文件（离线，只涉及几百字节）。"""
+        try:
+            ok, note = ensure_preprocessor_config(model_path, self._model_id)
+        except Exception as e:  # noqa: BLE001 - 修复失败不影响「已安装」的判定
+            self.log.emit(f"检查模型特征配置失败: {e}", "warning")
+            return
+        if note:
+            level = "warning" if ok else "error"
+            self.log.emit(note, level)
+
     def _download_via_http(self, model_path: str):
         base_url = self.MODEL_URLS.get(self._source, {}).get(self._model_id)
         if not base_url:
@@ -173,7 +198,7 @@ class ModelDownloadThread(QThread):
             self.log.emit(f"下载 {filename}...", "info")
 
             try:
-                self._download_file_with_progress(
+                found = self._download_file_with_progress(
                     file_url, temp_path,
                     base_percent=int(i / total_files * 100),
                     file_percent=int(100 / total_files)
@@ -187,6 +212,18 @@ class ModelDownloadThread(QThread):
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                 return
+
+            if not found:
+                # 下载源没这个文件：可选文件跳过，必需文件视为源不可用
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                if filename in self.OPTIONAL_FILES:
+                    self.log.emit(f"{filename} 在该下载源不存在，跳过", "info")
+                    continue
+                raise RuntimeError(
+                    f"文件 {filename} 在下载源中不存在（HTTP 404），"
+                    f"请切换下载源后重试"
+                )
 
             if os.path.exists(temp_path):
                 file_size = os.path.getsize(temp_path)
@@ -217,6 +254,9 @@ class ModelDownloadThread(QThread):
                 self._save_download_state(state_file, downloaded_files)
 
         self._ensure_vocabulary_json(model_path)
+        # 兜底：镜像里没有 preprocessor_config.json（或内容不对）时本地补一份，
+        # 否则 large-v3 装完仍然一识别就报 mel 维度不匹配。
+        self._repair_installed_model(model_path)
 
         if os.path.exists(state_file):
             os.remove(state_file)
@@ -281,7 +321,8 @@ class ModelDownloadThread(QThread):
             self.log.emit(f"生成 vocabulary.json 失败: {e}", "warning")
 
     def _download_file_with_progress(self, url: str, output_path: str,
-                                      base_percent: int = 0, file_percent: int = 100):
+                                      base_percent: int = 0, file_percent: int = 100) -> bool:
+        """下载单个文件；返回 False 表示下载源里没有这个文件（404/403）。"""
         import httpx
 
         headers = {"User-Agent": "DeepSub/0.1.0"}
@@ -293,8 +334,15 @@ class ModelDownloadThread(QThread):
             existing_size = 0
 
         with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=120.0) as response:
+            if response.status_code in (403, 404, 410):
+                # 镜像仓库文件列表不完全一致是常态，交给调用方决定跳不跳过。
+                # 不能把 404 的响应体写进文件：那会变成一页 HTML，后面当成
+                # JSON 解析时报「文件不是有效的 JSON 格式」，把真正原因盖掉。
+                return False
             if response.status_code == 416:
-                return
+                return True
+            if response.status_code >= 400:
+                raise RuntimeError(f"下载失败 HTTP {response.status_code}: {url}")
 
             total_size = int(response.headers.get("content-length", 0))
             if response.status_code == 206:
@@ -314,6 +362,8 @@ class ModelDownloadThread(QThread):
                     if total_size > 0:
                         file_pct = int(downloaded / total_size * file_percent)
                         self.progress.emit(self._model_id, base_percent + file_pct)
+
+        return True
 
     def _load_download_state(self, state_file: str) -> list:
         if os.path.exists(state_file):

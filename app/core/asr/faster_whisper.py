@@ -11,6 +11,11 @@ from typing import Callable, Optional
 
 from app.core.asr.base import ASRBase
 from app.core.asr.chunker import AudioChunk
+from app.core.asr.whisper_model_files import (
+    PREPROCESSOR_FILENAME,
+    ensure_preprocessor_config,
+    read_feature_size,
+)
 from app.core.subtitle.models import SubtitleDocument, SubtitleItem, SubtitleMetadata, SubtitleWord
 from app.core.utils.gpu_utils import detect_cuda, get_gpu_vram
 from app.core.utils.file_utils import (
@@ -65,8 +70,9 @@ _FAILURE_PATTERNS: tuple[tuple[tuple[str, ...], str, str], ...] = (
     ),
     (
         ("invalid input features shape",),
-        "模型与识别程序的 mel 通道数不匹配",
-        "改用 large-v3 模型，或更新识别程序到较新版本",
+        "模型与识别程序的 mel 通道数不匹配（large-v3 需要 128 维，程序按 80 维提取）",
+        "模型目录缺少 preprocessor_config.json（340 字节）是最常见原因，"
+        "补上该文件或改用 large-v2 模型；仍不行再考虑更新识别程序",
     ),
     (
         ("no such file or directory", "cannot find the file", "系统找不到指定的文件",
@@ -400,26 +406,82 @@ class FasterWhisperASR(ASRBase):
         target = os.path.join(model_dir, resolved_model)
         return f'mklink /J "{link}" "{target}"'
 
+    def _model_dirs_to_check(self, model: str, resolved_model: str, model_dir: str) -> list[str]:
+        """模型可能所在的所有目录（默认目录优先，其次程序 `_models` 下的联接/移动位置）。"""
+        dirs: list[str] = []
+        if model_dir:
+            for name in (resolved_model, model):
+                if name:
+                    dirs.append(os.path.join(str(model_dir), name))
+        if self._exe_path:
+            exe_dir = os.path.dirname(self._exe_path)
+            dirs.append(
+                os.path.join(exe_dir, "_models", self._exe_model_dir_name(resolved_model))
+            )
+        return list(dict.fromkeys(dirs))
+
     def _get_model_n_mels(self, model_name: str, model_dir: str) -> int | None:
+        """模型要求的 mel 通道数。
+
+        优先读 `preprocessor_config.json` 的 feature_size —— 它才是 faster-whisper
+        实际使用的值；`config.json` 里的 `n_mels` 在部分镜像里是错的
+        （large-v3 也写 80），只作兜底。
+        """
         import json
 
-        candidates = []
-        if not self._is_xxl():
-            exe_dir = os.path.dirname(self._exe_path)
-            exe_dir_name = self._exe_model_dir_name(model_name)
-            candidates.append(os.path.join(exe_dir, "_models", exe_dir_name, "config.json"))
-        if model_dir:
-            candidates.append(os.path.join(str(model_dir), model_name, "config.json"))
-
-        for cfg_path in candidates:
-            if os.path.isfile(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cfg = json.load(f)
-                    return cfg.get("n_mels")
-                except (json.JSONDecodeError, OSError):
-                    continue
+        for path in self._model_dirs_to_check(model_name, model_name, model_dir):
+            if not os.path.isdir(path):
+                continue
+            feature_size = read_feature_size(path)
+            if feature_size:
+                return feature_size
+            cfg_path = os.path.join(path, "config.json")
+            if not os.path.isfile(cfg_path):
+                continue
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(cfg, dict) and cfg.get("n_mels"):
+                return cfg.get("n_mels")
         return None
+
+    def _ensure_model_features(
+        self,
+        model: str,
+        resolved_model: str,
+        model_dir: str,
+        log_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
+        """补齐 128 维模型必需的 `preprocessor_config.json`。
+
+        large-v3 系列缺这个 340 字节的文件时，识别程序会按 80 维算特征，
+        进程一开始就报 `Invalid input features shape`（用户看到的往往是一句
+        「语块 1 转录失败...重试」）。这里在启动进程前就地补上，失败才报错。
+        """
+        for path in self._model_dirs_to_check(model, resolved_model, model_dir):
+            if not os.path.isdir(path):
+                continue
+            ok, note = ensure_preprocessor_config(path, resolved_model)
+            if not ok:
+                raise ASRSetupError(
+                    f"模型 '{model}' 的特征配置文件无法就绪，已停止本次识别。\n"
+                    f"目录：{path}\n原因：{note}\n\n"
+                    f"large-v3 系列需要 128 维 mel 特征，识别程序靠 "
+                    f"{PREPROCESSOR_FILENAME} 判断维度；该文件缺失或损坏时会按 "
+                    f"80 维提取，必然报 mel 通道维度不匹配。\n"
+                    f"修复方式（任选其一）：\n"
+                    f"1. 从 https://huggingface.co/Systran/faster-whisper-large-v3/"
+                    f"resolve/main/{PREPROCESSOR_FILENAME} 下载（340 字节）后放进上面的目录；\n"
+                    f"2. 在「语音识别」页重新下载该模型；\n"
+                    f"3. 或改用 'large-v2' 模型（80 维，不受影响）。"
+                )
+            if note:
+                _logger.warning("模型 %s 特征配置：%s（%s）", model, note, path)
+                if log_callback:
+                    log_callback(f"{note}（{path}）", "warning")
+            return
 
     def _validate_model_files(self, resolved_model: str, model_dir: str) -> None:
         import json
@@ -1643,6 +1705,9 @@ class FasterWhisperASR(ASRBase):
                 self._ensure_model_alias(str(model_dir), model, resolved_model)
 
         self._validate_model_files(resolved_model, model_dir)
+        # 先补特征配置，再做「程序是否支持该模型」的判定：否则 128 维模型在
+        # 没补齐时会被当 80 维，兼容性检查拿不到真实维度。
+        self._ensure_model_features(model, resolved_model, model_dir, log_callback)
         self._check_model_exe_compatibility(model, resolved_model, model_dir)
 
         kwargs = {
@@ -1809,16 +1874,23 @@ class FasterWhisperASR(ASRBase):
             dir_info = f"Output directory contents: {dir_contents}" if dir_contents else "Output directory is empty or inaccessible"
 
             if "Invalid input features shape" in tail:
-                n_mels = self._get_model_n_mels(resolved_model, str(model_dir))
-                n_mels_hint = f" 模型需要 {n_mels} 个 mel 通道。" if n_mels else ""
-                raise RuntimeError(
-                    f"FasterWhisper CPU 可执行文件不支持模型 '{model}'。"
-                    f"{n_mels_hint}\n"
-                    f"可执行文件默认使用 80 个 mel 频率通道，与模型要求不匹配。\n\n"
+                # 真实原因几乎都是模型目录缺/坏了 preprocessor_config.json，
+                # 与「CPU / GPU」无关（GPU 版同样报这个错），所以文案按事实写。
+                model_mels = self._get_model_n_mels(resolved_model, str(model_dir))
+                device = "GPU" if self._gpu_mode else "CPU"
+                detail = f"模型需要 {model_mels} 维 mel 特征；" if model_mels else ""
+                raise ASRSetupError(
+                    f"识别程序与模型 '{model}' 的 mel 通道数不匹配（{device} 模式，"
+                    f"{detail}进程按 80 维提取特征）。\n"
+                    f"最常见的原因是模型目录缺少或损坏了 {PREPROCESSOR_FILENAME}"
+                    f"（128 维模型的必需文件，只有 340 字节）。\n\n"
                     f"建议:\n"
-                    f"  1. 改用 'large-v3' 模型\n"
-                    f"  2. 切换到 GPU 模式\n"
-                    f"  3. 更新 FasterWhisper 可执行文件\n\n"
+                    f"  1. 确认模型目录里有 {PREPROCESSOR_FILENAME}，没有就从 "
+                    f"https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/"
+                    f"{PREPROCESSOR_FILENAME} 下载后放进模型目录；\n"
+                    f"  2. 或在「语音识别」页重新下载模型 '{model}'；\n"
+                    f"  3. 或改用 'large-v2' 模型（80 维，不受影响）；\n"
+                    f"  4. 仍不行说明识别程序版本过旧、不支持该模型，请更新识别程序。\n\n"
                     f"原始错误:\n{tail}"
                 )
 
