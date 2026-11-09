@@ -552,8 +552,8 @@ class FasterWhisperASR(ASRBase):
             self._model_move_note = ""  # 每个任务只提示一次，避免 44 个语块各刷一遍
             if log_callback:
                 log_callback(
-                    f"{move_note}。「语音识别」页可能显示该模型未下载，属正常现象；"
-                    "如需切回 CPU 版，需要重新下载模型到默认位置",
+                    f"{move_note}。「语音识别」页仍会显示该模型已安装"
+                    "（鼠标悬停状态列可看到实际路径），GPU 与 CPU 版切换时会自动找回",
                     "warning",
                 )
 
