@@ -78,6 +78,59 @@ def get_fw_gpu_dir() -> str:
     return d
 
 
+_EXE_MODEL_PREFIX = "faster-whisper-"
+_EXE_DISTIL_PREFIX = "faster-distil-whisper-"
+
+
+def exe_model_dir_name(model_id: str) -> str:
+    """识别程序在自身 `_models` 下使用的目录名。
+
+    XXL 版把 `-m large-v3` 解析成 `<exe目录>/_models/faster-whisper-large-v3`，
+    distil 系列则用 `faster-distil-whisper-` 前缀。
+    """
+    if model_id.startswith("distil-"):
+        return _EXE_DISTIL_PREFIX + model_id[len("distil-"):]
+    return _EXE_MODEL_PREFIX + model_id
+
+
+def get_whisper_model_candidates(model_id: str) -> list[str]:
+    """模型可能存放的所有位置，按优先级排列（默认目录优先）。"""
+    candidates = [os.path.join(get_whisper_models_dir(), model_id)]
+    gpu_root = get_fw_gpu_dir()
+    try:
+        entries = sorted(os.listdir(gpu_root))
+    except OSError:
+        entries = []
+    for name in entries:
+        sub = os.path.join(gpu_root, name)
+        if os.path.isdir(sub):
+            candidates.append(
+                os.path.join(sub, "_models", exe_model_dir_name(model_id))
+            )
+    return candidates
+
+
+def _looks_like_model(path: str) -> bool:
+    return os.path.isfile(os.path.join(path, "model.bin"))
+
+
+def resolve_whisper_model_dir(model_id: str) -> str:
+    """返回模型实际所在目录。
+
+    目录联接不可用时，识别模块会把模型**移动**到 `<exe目录>/_models/` 下，
+    所以不能再只看默认位置。都没找到时返回默认位置，便于下载流程照常使用。
+    """
+    candidates = get_whisper_model_candidates(model_id)
+    for path in candidates:
+        if _looks_like_model(path):
+            return path
+    return candidates[0]
+
+
+def is_whisper_model_installed(model_id: str) -> bool:
+    return _looks_like_model(resolve_whisper_model_dir(model_id))
+
+
 def get_fw_cpu_exe() -> str:
     return os.path.join(get_tools_root(), "faster-whisper", "faster-whisper.exe")
 

@@ -470,9 +470,10 @@ class ModelPage(WizardPageBase):
         self._refresh_status()
 
     def _installed(self, model_id: str) -> bool:
-        from app.core.utils.file_utils import get_whisper_models_dir
+        from app.core.utils.file_utils import is_whisper_model_installed
 
-        return os.path.exists(os.path.join(get_whisper_models_dir(), model_id, "model.bin"))
+        # 模型可能被移到识别程序的 _models 下，不能只看默认目录
+        return is_whisper_model_installed(model_id)
 
     def _refresh_status(self):
         model_id = self._model_combo.currentData()

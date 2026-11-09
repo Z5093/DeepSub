@@ -647,8 +647,7 @@ class FasterWhisperPage(QWidget):
                 break
         for mid, btn in self._model_download_btns.items():
             if mid != model_id:
-                model_path = os.path.join(self._get_models_dir(), mid)
-                is_installed = os.path.exists(os.path.join(model_path, "model.bin"))
+                is_installed, _path = self._model_status(mid)
                 btn.setEnabled(not is_installed)
                 btn.setText("已安装" if is_installed else "下载")
         signal_bus.model_download_completed.emit(model_id)
@@ -669,8 +668,7 @@ class FasterWhisperPage(QWidget):
                 break
         for mid, btn in self._model_download_btns.items():
             if mid != model_id:
-                model_path = os.path.join(self._get_models_dir(), mid)
-                is_installed = os.path.exists(os.path.join(model_path, "model.bin"))
+                is_installed, _path = self._model_status(mid)
                 btn.setEnabled(not is_installed)
                 btn.setText("已安装" if is_installed else "下载")
         signal_bus.model_download_failed.emit(model_id, error)
@@ -679,14 +677,26 @@ class FasterWhisperPage(QWidget):
         from app.core.utils.file_utils import get_whisper_models_dir
         return get_whisper_models_dir()
 
+    def _model_status(self, model_id):
+        """返回 (是否已安装, 实际所在目录)。
+
+        模型可能被移到识别程序自己的 `_models` 下（目录联接不可用时），
+        所以判断安装状态不能只看默认目录。
+        """
+        from app.core.utils.file_utils import is_whisper_model_installed, resolve_whisper_model_dir
+        return (
+            is_whisper_model_installed(model_id),
+            resolve_whisper_model_dir(model_id),
+        )
+
     def _refresh_model_status(self):
-        model_dir = self._get_models_dir()
         for row, (model_id, info) in enumerate(WHISPER_MODELS.items()):
-            model_path = os.path.join(model_dir, model_id)
-            is_installed = os.path.exists(os.path.join(model_path, "model.bin"))
+            is_installed, model_path = self._model_status(model_id)
             status_item = self._model_table.item(row, 2)
             if status_item:
                 status_item.setText("已安装" if is_installed else "未安装")
+                if is_installed:
+                    status_item.setToolTip(f"模型位置：{model_path}")
             if model_id in self._model_download_btns:
                 if is_installed:
                     self._model_download_btns[model_id].setEnabled(False)

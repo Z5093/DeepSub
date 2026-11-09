@@ -13,7 +13,13 @@ from app.core.asr.base import ASRBase
 from app.core.asr.chunker import AudioChunk
 from app.core.subtitle.models import SubtitleDocument, SubtitleItem, SubtitleMetadata, SubtitleWord
 from app.core.utils.gpu_utils import detect_cuda, get_gpu_vram
-from app.core.utils.file_utils import get_whisper_models_dir, get_fw_gpu_dir, get_fw_cpu_exe
+from app.core.utils.file_utils import (
+    get_whisper_models_dir,
+    get_fw_gpu_dir,
+    get_fw_cpu_exe,
+    exe_model_dir_name,
+    resolve_whisper_model_dir,
+)
 from app.core.utils.ffmpeg_utils import get_ffmpeg_path
 from app.core.utils.cache_utils import generate_asr_cache_key, get_cached_asr_result, save_asr_cache
 from app.common.logger import get_logger
@@ -26,9 +32,10 @@ _FAILURE_PATTERNS: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (
         ("unknown model not found", "try these known models", "model not found at"),
         "识别程序找不到指定的模型目录",
-        "XXL 版会把 -m 的值当模型名，拼到 <程序目录>/_models/faster-whisper-<名字> 下，"
-        "传完整路径必然失败。请确认程序目录可写（不要放在 Program Files），"
-        "或在「语音识别」页重新下载模型后重试",
+        "XXL 版只认模型名（如 large-v3），会去 <程序目录>/_models/faster-whisper-<名字> "
+        "找模型，给它完整路径必然失败。请确认程序目录可写（不要放在 Program Files）；"
+        "仍失败时把日志里的 mklink 命令粘贴到管理员命令提示符执行一次，"
+        "或在「语音识别」页把运行模式改成 CPU",
     ),
     (
         ("out of memory", "cuda_error_out_of_memory", "cudaerror_memoryallocation",
@@ -82,10 +89,16 @@ def diagnose_asr_failure(output_tail: str, return_code: int = 0) -> tuple[str, s
 
 _GPU_EXE_NAME = "faster-whisper-xxl.exe"
 
-_CPU_MODEL_ALIASES: dict[str, str] = {}
 
-_EXE_MODEL_PREFIX = "faster-whisper-"
-_EXE_DISTIL_PREFIX = "faster-distil-whisper-"
+class ASRSetupError(RuntimeError):
+    """识别程序配置错误（模型目录、程序缺失等）。
+
+    这类错误对所有语块都成立，逐块重试没有任何意义：44 个语块 × 10 次
+    只是把同一个失败重复 440 遍。`run_chunks` 遇到它会直接中止整个任务。
+    """
+
+
+_CPU_MODEL_ALIASES: dict[str, str] = {}
 
 _WHISPER_LANG_TO_BCP47: dict[str, str] = {
     "english": "en-US", "en": "en-US",
@@ -115,6 +128,10 @@ class FasterWhisperASR(ASRBase):
         self._gpu_mode = gpu_mode if gpu_mode else self._detect_gpu_mode()
         self._exe_path = self._resolve_exe()
         self._program_name = os.path.basename(self._exe_path)
+        #: 最近一次创建模型目录联接失败的原因，供报错文案和日志使用。
+        self._last_model_link_error = ""
+        #: 模型被移动过时的一句话说明，只在本次任务里提示一次。
+        self._model_move_note = ""
         self._process: Optional[subprocess.Popen] = None
         _logger.info(
             "识别初始化 | 模式=%s | 程序=%s | 存在=%s",
@@ -208,9 +225,8 @@ class FasterWhisperASR(ASRBase):
             shutil.copytree(original_path, alias_path)
 
     def _exe_model_dir_name(self, model_name: str) -> str:
-        if model_name.startswith("distil-"):
-            return _EXE_DISTIL_PREFIX + model_name[len("distil-"):]
-        return _EXE_MODEL_PREFIX + model_name
+        # 与 UI 侧共用同一套命名规则，避免「识别能看到、页面说没安装」
+        return exe_model_dir_name(model_name)
 
     def _ensure_exe_model_available(self, resolved_model: str, model_dir: str, original_model: str = "") -> bool:
         """在识别程序的 `_models` 下准备 `faster-whisper-<模型名>` 目录。
@@ -221,6 +237,9 @@ class FasterWhisperASR(ASRBase):
         用目录联接（junction）把用户的模型目录挂到程序期望的位置。
 
         返回 True 表示 `_models/faster-whisper-<名字>` 已就绪。
+
+        三级策略：目录联接（零磁盘占用）→ 移动模型目录（不额外占空间）
+        → 两者都失败才返回 False。
         """
         exe_dir = os.path.dirname(self._exe_path)
         exe_models_dir = os.path.join(exe_dir, "_models")
@@ -241,39 +260,145 @@ class FasterWhisperASR(ASRBase):
                 except OSError:
                     return False
 
-        source_path = os.path.join(model_dir, resolved_model)
-        if not os.path.isdir(source_path) and original_model:
-            source_path = os.path.join(model_dir, original_model)
-        if not os.path.isdir(source_path):
+        source_path = ""
+        for candidate in (resolved_model, original_model):
+            if not candidate:
+                continue
+            p = os.path.join(model_dir, candidate)
+            if os.path.isdir(p):
+                source_path = p
+                break
+        if not source_path:
+            # 模型可能已被移动到另一个识别程序（GPU ↔ CPU 切换）的 _models 下，
+            # 这种时候要能从新位置取回来，而不是报「模型不存在」。
+            found = resolve_whisper_model_dir(resolved_model)
+            if (
+                os.path.isdir(found)
+                and os.path.abspath(found) != os.path.abspath(exe_model_path)
+            ):
+                source_path = found
+        if not source_path:
+            self._last_model_link_error = (
+                f"模型目录不存在：{os.path.join(model_dir, resolved_model)}"
+            )
             return False
 
         try:
             os.makedirs(exe_models_dir, exist_ok=True)
         except OSError as e:
-            _logger.warning("无法创建 %s：%s", exe_models_dir, e)
+            self._last_model_link_error = f"无法创建 {exe_models_dir}：{e}"
+            _logger.warning("%s", self._last_model_link_error)
             return False
 
         try:
             if os.name == "nt":
-                subprocess.run(
+                # 不用 check=True：需要把 mklink 的 stderr 原样带进日志，
+                # 否则联接失败时只能看到一句「返回非 0」，无从定位。
+                proc = subprocess.run(
                     ["cmd", "/c", "mklink", "/J", exe_model_path, source_path],
-                    check=True,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
                     timeout=10,
                 )
+                if proc.returncode != 0:
+                    detail = (proc.stderr or proc.stdout or "").strip()
+                    raise OSError(f"mklink 返回 {proc.returncode}：{detail}")
             else:
                 os.symlink(source_path, exe_model_path, target_is_directory=True)
-        except (subprocess.CalledProcessError, OSError) as e:
-            # XXL 的模型有数 GB，复制一份既慢又占空间，这里不做拷贝兜底。
-            if self._is_xxl():
-                _logger.warning("创建模型目录联接失败：%s | %s", exe_model_path, e)
+        except (subprocess.SubprocessError, OSError) as e:
+            self._last_model_link_error = (
+                f"创建目录联接失败 {exe_model_path} -> {source_path}：{e}"
+            )
+            _logger.warning("%s", self._last_model_link_error)
+            # 目录联接在 exFAT/FAT32、U 盘、受控目录、杀软拦截下会失败。
+            # 改用「移动」而不是「复制」：移动不额外占磁盘，large-v3 有 3GB，
+            # 复制一份对磁盘紧张的用户是不可接受的。
+            if not self._move_model_into_exe_dir(source_path, exe_model_path):
                 return False
-            shutil.copytree(source_path, exe_model_path)
 
         return os.path.isdir(exe_model_path)
+
+    @staticmethod
+    def _dir_size(path: str) -> int:
+        total = 0
+        for cur, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(cur, name))
+                except OSError:
+                    pass
+        return total
+
+    def _move_model_into_exe_dir(self, source_path: str, exe_model_path: str) -> bool:
+        """把模型目录移动到程序期望的位置，作为目录联接不可用时的兜底。
+
+        优先 `os.replace`（同一卷内是一次改名，瞬时且不占额外空间）；
+        跨卷时才退化为「复制到 `<目标>.copying` → 校验大小 → 改名 → 删源」。
+        全程不留下半成品：入口的 `os.path.isdir` 只认最终名字。
+        """
+        # 同卷：一次 rename 完成，零额外占用
+        try:
+            os.replace(source_path, exe_model_path)
+            self._model_move_note = (
+                f"模型已移动：{source_path} → {exe_model_path}"
+            )
+            _logger.info("%s", self._model_move_note)
+            return True
+        except OSError as e:
+            _logger.info("同卷移动不可用（%s），改为跨卷搬运", e)
+
+        tmp_path = exe_model_path + ".copying"
+        try:
+            if os.path.lexists(tmp_path):
+                shutil.rmtree(tmp_path, ignore_errors=True)
+
+            need = self._dir_size(source_path)
+            parent = os.path.dirname(exe_model_path) or "."
+            free = shutil.disk_usage(parent).free
+            if need and free < need * 1.1:
+                self._last_model_link_error += (
+                    f"（改为移动模型时磁盘空间不足：需要约 {need / 1073741824:.1f} GB，"
+                    f"可用 {free / 1073741824:.1f} GB）"
+                )
+                _logger.warning("%s", self._last_model_link_error)
+                return False
+
+            _logger.info(
+                "跨卷搬运模型：%s -> %s（约 %.1f GB，仅首次）",
+                source_path, exe_model_path, need / 1073741824,
+            )
+            shutil.copytree(source_path, tmp_path)
+            if self._dir_size(tmp_path) != need:
+                raise OSError("复制后的模型大小与原目录不一致")
+            os.replace(tmp_path, exe_model_path)
+        except OSError as e:
+            self._last_model_link_error += f"（移动模型也失败：{e}）"
+            _logger.warning("%s", self._last_model_link_error)
+            shutil.rmtree(tmp_path, ignore_errors=True)
+            return False
+
+        # 复制且校验通过后才删源，删源失败不影响识别，只是多占一份空间
+        try:
+            shutil.rmtree(source_path)
+            self._model_move_note = (
+                f"模型已移动到 {exe_model_path}（原位置 {source_path} 已删除）"
+            )
+        except OSError as e:
+            self._model_move_note = (
+                f"模型已复制到 {exe_model_path}，但原目录 {source_path} 删除失败（{e}），"
+                "可手动删除以释放空间"
+            )
+        _logger.info("%s", self._model_move_note)
+        return True
+
+    def _model_link_manual_cmd(self, resolved_model: str, model_dir: str) -> str:
+        """给用户一条可直接复制的 mklink 命令，用于手工修复联接。"""
+        exe_dir = os.path.dirname(self._exe_path)
+        link = os.path.join(exe_dir, "_models", self._exe_model_dir_name(resolved_model))
+        target = os.path.join(model_dir, resolved_model)
+        return f'mklink /J "{link}" "{target}"'
 
     def _get_model_n_mels(self, model_name: str, model_dir: str) -> int | None:
         import json
@@ -403,22 +528,34 @@ class FasterWhisperASR(ASRBase):
             if exe_ready:
                 cmd.extend(["-m", resolved_model])
             else:
-                # 兜底：极少数旧版程序支持直接给目录路径，保留该写法并留日志。
-                local_path = ""
-                if model_dir:
-                    for candidate in (resolved_model, model):
-                        p = os.path.join(str(model_dir), candidate)
-                        if os.path.isdir(p):
-                            local_path = p
-                            break
-                if local_path:
-                    _logger.warning(
-                        "模型目录联接未就绪，回退为直接传模型路径（XXL 可能不支持）: %s",
-                        local_path,
-                    )
-                    cmd.extend(["-m", local_path])
-                else:
-                    cmd.extend(["-m", resolved_model])
+                # 这里原本会「兜底」把绝对路径塞给 -m，但 XXL 只会把它当名字
+                # 拼成 `_models/faster-whisper-E:\...\large-v3`，必然报
+                # `Unknown model not found`。必失败的重试没有意义，
+                # 直接抛出配置级错误，让 run_chunks 中止而不是逐块重试。
+                manual = self._model_link_manual_cmd(resolved_model, str(model_dir or ""))
+                reason = getattr(self, "_last_model_link_error", "") or "模型目录联接未就绪"
+                raise ASRSetupError(
+                    "GPU 识别程序无法定位模型目录，已停止本次识别。\n"
+                    f"原因：{reason}\n\n"
+                    "（已尝试：建立目录联接、把模型移动到程序目录，均未成功）\n\n"
+                    "XXL 版只接受模型名（如 large-v3），会自己去程序目录下的 "
+                    "_models\\faster-whisper-<模型名> 找模型，给它绝对路径一定失败。\n\n"
+                    "修复方式（任选其一）：\n"
+                    "1. 用管理员身份打开命令提示符，执行一次即可：\n"
+                    f"   {manual}\n"
+                    "2. 或把整个模型文件夹直接移动到上面命令的目标位置；\n"
+                    "3. 或在「语音识别」页把运行模式改成 CPU 版本。"
+                )
+
+        move_note = getattr(self, "_model_move_note", "")
+        if move_note:
+            self._model_move_note = ""  # 每个任务只提示一次，避免 44 个语块各刷一遍
+            if log_callback:
+                log_callback(
+                    f"{move_note}。「语音识别」页可能显示该模型未下载，属正常现象；"
+                    "如需切回 CPU 版，需要重新下载模型到默认位置",
+                    "warning",
+                )
 
         cmd.extend(["--print_progress"])
 
@@ -748,6 +885,13 @@ class FasterWhisperASR(ASRBase):
                             audio_offset=0.0 if chunk.is_vad else chunk.offset,
                         )
                         break
+                    except ASRSetupError as e:
+                        # 配置级错误（模型目录/程序缺失）对所有语块都成立，
+                        # 逐块重试只是把同一个失败重复几十遍，直接中止整批任务。
+                        _logger.error("识别配置错误，中止整批任务: %s", e)
+                        if log_callback:
+                            log_callback(f"识别配置错误，已中止任务: {e}", "error")
+                        raise
                     except Exception as e:
                         last_error = str(e)
                         if attempt < chunk_max_retries:
